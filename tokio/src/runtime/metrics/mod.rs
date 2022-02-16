@@ -21,10 +21,13 @@ cfg_metrics! {
 
     mod worker;
     pub(crate) use worker::WorkerMetrics;
+
+    mod io;
+    pub(crate) use io::IoDriverMetrics;
 }
 
 cfg_not_metrics! {
     mod mock;
 
-    pub(crate) use mock::{SchedulerMetrics, WorkerMetrics, MetricsBatch};
+    pub(crate) use mock::{SchedulerMetrics, WorkerMetrics, MetricsBatch, IoDriverMetrics};
 }

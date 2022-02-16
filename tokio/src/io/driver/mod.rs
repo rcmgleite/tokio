@@ -15,6 +15,7 @@ mod scheduled_io;
 use scheduled_io::ScheduledIo;
 
 use crate::park::{Park, Unpark};
+use crate::runtime::IoDriverMetrics;
 use crate::util::slab::{self, Slab};
 use crate::{loom::sync::Mutex, util::bit};
 
@@ -74,6 +75,8 @@ pub(super) struct Inner {
 
     /// Used to wake up the reactor from a call to `turn`.
     waker: mio::Waker,
+
+    metrics: IoDriverMetrics,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
@@ -130,6 +133,7 @@ impl Driver {
                 registry,
                 io_dispatch: allocator,
                 waker,
+                metrics: IoDriverMetrics::default(),
             }),
         })
     }
@@ -196,6 +200,8 @@ impl Driver {
             // token no longer valid!
             return;
         }
+
+        self.inner.metrics.incr_ready_count();
 
         io.wake(ready);
     }
@@ -298,6 +304,17 @@ impl Handle {
     pub(super) fn inner(&self) -> Option<Arc<Inner>> {
         self.inner.upgrade()
     }
+
+    pub(crate) fn with_io_driver_metrics<F, R>(&self, f: F) -> Option<R>
+    where
+        F: Fn(&IoDriverMetrics) -> R,
+    {
+        if let Some(inner) = self.inner() {
+            Some(f(&inner.metrics))
+        } else {
+            None
+        }
+    }
 }
 
 impl Unpark for Handle {
@@ -335,12 +352,18 @@ impl Inner {
         self.registry
             .register(source, mio::Token(token), interest.to_mio())?;
 
+        self.metrics.incr_fd_count();
+
         Ok(shared)
     }
 
     /// Deregisters an I/O resource from the reactor.
     pub(super) fn deregister_source(&self, source: &mut impl mio::event::Source) -> io::Result<()> {
-        self.registry.deregister(source)
+        self.registry.deregister(source)?;
+
+        self.metrics.dec_fd_count();
+
+        Ok(())
     }
 }
 

@@ -6,6 +6,14 @@ pub(crate) struct WorkerMetrics {}
 
 pub(crate) struct MetricsBatch {}
 
+pub(crate) struct IoDriverMetrics {}
+
+impl IoDriverMetrics {
+    pub(crate) fn new() -> Self {
+        Self {}
+    }
+}
+
 impl SchedulerMetrics {
     pub(crate) fn new() -> Self {
         Self {}

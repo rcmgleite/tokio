@@ -446,4 +446,14 @@ impl RuntimeMetrics {
     pub fn worker_local_queue_depth(&self, worker: usize) -> usize {
         self.handle.spawner.worker_local_queue_depth(worker)
     }
+
+    pub fn io_driver_fd_count(&self) -> Option<u64> {
+        let handle = self.handle.io_handle.as_ref()?;
+        handle.with_io_driver_metrics(|m| m.fd_count.load(Relaxed))
+    }
+
+    pub fn io_driver_ready_count(&self) -> Option<u64> {
+        let handle = self.handle.io_handle.as_ref()?;
+        handle.with_io_driver_metrics(|m| m.ready_count.load(Relaxed))
+    }
 }

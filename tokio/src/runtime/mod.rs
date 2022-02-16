@@ -186,12 +186,12 @@ cfg_metrics! {
     mod metrics;
     pub use metrics::RuntimeMetrics;
 
-    pub(crate) use metrics::{MetricsBatch, SchedulerMetrics, WorkerMetrics};
+    pub(crate) use metrics::{MetricsBatch, SchedulerMetrics, WorkerMetrics, IoDriverMetrics};
 }
 
 cfg_not_metrics! {
     pub(crate) mod metrics;
-    pub(crate) use metrics::{SchedulerMetrics, WorkerMetrics, MetricsBatch};
+    pub(crate) use metrics::{SchedulerMetrics, WorkerMetrics, MetricsBatch, IoDriverMetrics};
 }
 
 cfg_rt! {
