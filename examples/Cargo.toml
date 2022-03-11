@@ -91,3 +91,11 @@ path = "named-pipe-ready.rs"
 [[example]]
 name = "named-pipe-multi-client"
 path = "named-pipe-multi-client.rs"
+
+[[example]]
+name = "tcp-sources"
+path = "tcp-sources.rs"
+
+[[example]]
+name = "tcp-aggregation"
+path = "tcp-aggregation.rs"

@@ -1,0 +1,1780 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="534" onload="init(evt)" viewBox="0 0 1200 534" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				clearzoom();
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="534.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="517" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="517" > </text>
+<g id="frames">
+<g >
+<title>core::cmp::impls::&lt;impl core::cmp::Ord for i64&gt;::cmp (1 samples, 0.02%)</title><rect x="666.1" y="149" width="0.2" height="15.0" fill="rgb(218,6,53)" rx="2" ry="2" />
+<text  x="669.07" y="159.5" ></text>
+</g>
+<g >
+<title>tokio::net::tcp::stream::TcpStream::new (2 samples, 0.03%)</title><rect x="407.0" y="325" width="0.3" height="15.0" fill="rgb(236,199,52)" rx="2" ry="2" />
+<text  x="409.96" y="335.5" ></text>
+</g>
+<g >
+<title>core::ops::function::impls::&lt;impl core::ops::function::FnOnce&lt;A&gt; for &amp;F&gt;::call_once (51 samples, 0.80%)</title><rect x="10.0" y="277" width="9.4" height="15.0" fill="rgb(253,77,50)" rx="2" ry="2" />
+<text  x="13.00" y="287.5" ></text>
+</g>
+<g >
+<title>futures_core::task::__internal::atomic_waker::AtomicWaker::register (111 samples, 1.73%)</title><rect x="383.7" y="309" width="20.5" height="15.0" fill="rgb(229,227,41)" rx="2" ry="2" />
+<text  x="386.74" y="319.5" ></text>
+</g>
+<g >
+<title>tokio::time::clock::Clock::now (3 samples, 0.05%)</title><rect x="643.0" y="165" width="0.6" height="15.0" fill="rgb(227,43,1)" rx="2" ry="2" />
+<text  x="646.03" y="175.5" ></text>
+</g>
+<g >
+<title>std::panic::catch_unwind (51 samples, 0.80%)</title><rect x="10.0" y="325" width="9.4" height="15.0" fill="rgb(240,221,52)" rx="2" ry="2" />
+<text  x="13.00" y="335.5" ></text>
+</g>
+<g >
+<title>tokio::coop::CURRENT::__getit (3 samples, 0.05%)</title><rect x="866.9" y="133" width="0.6" height="15.0" fill="rgb(241,87,10)" rx="2" ry="2" />
+<text  x="869.94" y="143.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::time::Timespec::sub_timespec (1 samples, 0.02%)</title><rect x="591.4" y="85" width="0.2" height="15.0" fill="rgb(227,17,51)" rx="2" ry="2" />
+<text  x="594.43" y="95.5" ></text>
+</g>
+<g >
+<title>tokio::sync::mpsc::list::Tx&lt;T&gt;::push (248 samples, 3.87%)</title><rect x="924.3" y="149" width="45.7" height="15.0" fill="rgb(223,7,44)" rx="2" ry="2" />
+<text  x="927.26" y="159.5" >toki..</text>
+</g>
+<g >
+<title>tokio::loom::std::unsafe_cell::UnsafeCell&lt;T&gt;::with_mut (4,226 samples, 66.00%)</title><rect x="411.2" y="293" width="778.8" height="15.0" fill="rgb(248,24,20)" rx="2" ry="2" />
+<text  x="414.20" y="303.5" >tokio::loom::std::unsafe_cell::UnsafeCell&lt;T&gt;::with_mut</text>
+</g>
+<g >
+<title>tokio::time::driver::wheel::level::Level::next_expiration (2 samples, 0.03%)</title><rect x="597.1" y="117" width="0.4" height="15.0" fill="rgb(248,203,37)" rx="2" ry="2" />
+<text  x="600.14" y="127.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::state::State::transition_to_running (102 samples, 1.59%)</title><rect x="1169.9" y="181" width="18.8" height="15.0" fill="rgb(247,212,37)" rx="2" ry="2" />
+<text  x="1172.91" y="191.5" ></text>
+</g>
+<g >
+<title>mio::sys::unix::waker::eventfd::Waker::wake (1 samples, 0.02%)</title><rect x="253.6" y="213" width="0.2" height="15.0" fill="rgb(249,27,25)" rx="2" ry="2" />
+<text  x="256.63" y="223.5" ></text>
+</g>
+<g >
+<title>parking_lot::condvar::Condvar::wait_until_internal (19 samples, 0.30%)</title><rect x="15.9" y="133" width="3.5" height="15.0" fill="rgb(238,213,10)" rx="2" ry="2" />
+<text  x="18.90" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::park::either::Either&lt;A,B&gt; as tokio::park::Park&gt;::park (121 samples, 1.89%)</title><rect x="575.8" y="197" width="22.3" height="15.0" fill="rgb(246,204,4)" rx="2" ry="2" />
+<text  x="578.77" y="207.5" >&lt;..</text>
+</g>
+<g >
+<title>syscall (3 samples, 0.05%)</title><rect x="922.2" y="85" width="0.6" height="15.0" fill="rgb(230,169,20)" rx="2" ry="2" />
+<text  x="925.23" y="95.5" ></text>
+</g>
+<g >
+<title>__libc_connect (2 samples, 0.03%)</title><rect x="406.0" y="293" width="0.4" height="15.0" fill="rgb(249,83,43)" rx="2" ry="2" />
+<text  x="409.04" y="303.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::harness::Harness&lt;T,S&gt;::poll (4,226 samples, 66.00%)</title><rect x="411.2" y="325" width="778.8" height="15.0" fill="rgb(245,89,54)" rx="2" ry="2" />
+<text  x="414.20" y="335.5" >tokio::runtime::task::harness::Harness&lt;T,S&gt;::poll</text>
+</g>
+<g >
+<title>tokio::coop::RestoreOnPending::made_progress (1 samples, 0.02%)</title><rect x="198.9" y="277" width="0.2" height="15.0" fill="rgb(207,216,35)" rx="2" ry="2" />
+<text  x="201.90" y="287.5" ></text>
+</g>
+<g >
+<title>futures_task::waker::wake_arc_raw (3 samples, 0.05%)</title><rect x="922.8" y="149" width="0.5" height="15.0" fill="rgb(210,73,4)" rx="2" ry="2" />
+<text  x="925.78" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;std::time::Instant as core::ops::arith::Sub&gt;::sub (1 samples, 0.02%)</title><rect x="591.4" y="133" width="0.2" height="15.0" fill="rgb(228,208,11)" rx="2" ry="2" />
+<text  x="594.43" y="143.5" ></text>
+</g>
+<g >
+<title>tokio::signal::unix::driver::Driver::process (9 samples, 0.14%)</title><rect x="588.5" y="165" width="1.6" height="15.0" fill="rgb(238,224,16)" rx="2" ry="2" />
+<text  x="591.48" y="175.5" ></text>
+</g>
+<g >
+<title>futures_core::task::__internal::atomic_waker::AtomicWaker::register (2 samples, 0.03%)</title><rect x="14.1" y="117" width="0.3" height="15.0" fill="rgb(236,109,54)" rx="2" ry="2" />
+<text  x="17.05" y="127.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::thread_pool::idle::Idle::worker_to_notify (72 samples, 1.12%)</title><rect x="288.1" y="213" width="13.3" height="15.0" fill="rgb(248,91,50)" rx="2" ry="2" />
+<text  x="291.09" y="223.5" ></text>
+</g>
+<g >
+<title>tokio::sync::task::atomic_waker::AtomicWaker::register_by_ref (6 samples, 0.09%)</title><rect x="11.5" y="117" width="1.1" height="15.0" fill="rgb(226,82,54)" rx="2" ry="2" />
+<text  x="14.47" y="127.5" ></text>
+</g>
+<g >
+<title>tokio::park::thread::wake (3 samples, 0.05%)</title><rect x="587.2" y="117" width="0.5" height="15.0" fill="rgb(249,141,53)" rx="2" ry="2" />
+<text  x="590.19" y="127.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::thread_pool::worker::&lt;impl tokio::runtime::task::Schedule for alloc::sync::Arc&lt;tokio::runtime::thread_pool::worker::Shared&gt;&gt;::schedule (266 samples, 4.15%)</title><rect x="252.7" y="245" width="49.0" height="15.0" fill="rgb(241,123,5)" rx="2" ry="2" />
+<text  x="255.71" y="255.5" >toki..</text>
+</g>
+<g >
+<title>tokio::sync::mpsc::list::Tx&lt;T&gt;::find_block (29 samples, 0.45%)</title><rect x="964.6" y="133" width="5.4" height="15.0" fill="rgb(253,57,44)" rx="2" ry="2" />
+<text  x="967.62" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::sync::batch_semaphore::Acquire as core::ops::drop::Drop&gt;::drop (10 samples, 0.16%)</title><rect x="879.1" y="149" width="1.8" height="15.0" fill="rgb(235,163,40)" rx="2" ry="2" />
+<text  x="882.11" y="159.5" ></text>
+</g>
+<g >
+<title>__pthread_enable_asynccancel (22 samples, 0.34%)</title><rect x="1031.0" y="37" width="4.0" height="15.0" fill="rgb(219,190,1)" rx="2" ry="2" />
+<text  x="1033.96" y="47.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.02%)</title><rect x="409.5" y="261" width="0.2" height="15.0" fill="rgb(221,167,29)" rx="2" ry="2" />
+<text  x="412.54" y="271.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::state::State::transition_to_complete (1 samples, 0.02%)</title><rect x="1167.3" y="165" width="0.2" height="15.0" fill="rgb(211,191,49)" rx="2" ry="2" />
+<text  x="1170.33" y="175.5" ></text>
+</g>
+<g >
+<title>_int_malloc (197 samples, 3.08%)</title><rect x="1111.3" y="149" width="36.3" height="15.0" fill="rgb(246,192,28)" rx="2" ry="2" />
+<text  x="1114.31" y="159.5" >_in..</text>
+</g>
+<g >
+<title>tokio::io::driver::Driver::turn (51 samples, 0.80%)</title><rect x="578.3" y="165" width="9.4" height="15.0" fill="rgb(242,68,44)" rx="2" ry="2" />
+<text  x="581.35" y="175.5" ></text>
+</g>
+<g >
+<title>__rdl_alloc (9 samples, 0.14%)</title><rect x="1147.6" y="165" width="1.7" height="15.0" fill="rgb(254,211,13)" rx="2" ry="2" />
+<text  x="1150.61" y="175.5" ></text>
+</g>
+<g >
+<title>__vdso_clock_gettime (1 samples, 0.02%)</title><rect x="409.4" y="197" width="0.1" height="15.0" fill="rgb(222,147,12)" rx="2" ry="2" />
+<text  x="412.35" y="207.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::registration::Registration::deregister (1 samples, 0.02%)</title><rect x="143.8" y="277" width="0.2" height="15.0" fill="rgb(250,227,8)" rx="2" ry="2" />
+<text  x="146.79" y="287.5" ></text>
+</g>
+<g >
+<title>tokio::util::rand::thread_rng_n (6 samples, 0.09%)</title><rect x="409.9" y="325" width="1.1" height="15.0" fill="rgb(243,151,51)" rx="2" ry="2" />
+<text  x="412.91" y="335.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::Inner::add_source (1 samples, 0.02%)</title><rect x="407.0" y="277" width="0.1" height="15.0" fill="rgb(234,94,36)" rx="2" ry="2" />
+<text  x="409.96" y="287.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::thread_pool::worker::Context::run (4,226 samples, 66.00%)</title><rect x="411.2" y="245" width="778.8" height="15.0" fill="rgb(254,176,25)" rx="2" ry="2" />
+<text  x="414.20" y="255.5" >tokio::runtime::thread_pool::worker::Context::run</text>
+</g>
+<g >
+<title>std::time::Instant::duration_since (1 samples, 0.02%)</title><rect x="643.2" y="117" width="0.2" height="15.0" fill="rgb(243,181,12)" rx="2" ry="2" />
+<text  x="646.22" y="127.5" ></text>
+</g>
+<g >
+<title>futures_util::stream::stream::StreamExt::poll_next_unpin (1,420 samples, 22.18%)</title><rect x="144.2" y="325" width="261.7" height="15.0" fill="rgb(218,196,1)" rx="2" ry="2" />
+<text  x="147.16" y="335.5" >futures_util::stream::stream::Stre..</text>
+</g>
+<g >
+<title>parking_lot_core::parking_lot::lock_bucket_pair (1 samples, 0.02%)</title><rect x="587.2" y="85" width="0.2" height="15.0" fill="rgb(210,75,22)" rx="2" ry="2" />
+<text  x="590.19" y="95.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::thread_pool::ThreadPool::block_on (51 samples, 0.80%)</title><rect x="10.0" y="197" width="9.4" height="15.0" fill="rgb(227,26,24)" rx="2" ry="2" />
+<text  x="13.00" y="207.5" ></text>
+</g>
+<g >
+<title>__vdso_clock_gettime (1 samples, 0.02%)</title><rect x="643.4" y="69" width="0.2" height="15.0" fill="rgb(215,211,27)" rx="2" ry="2" />
+<text  x="646.40" y="79.5" ></text>
+</g>
+<g >
+<title>std::panic::catch_unwind (51 samples, 0.80%)</title><rect x="10.0" y="389" width="9.4" height="15.0" fill="rgb(225,42,45)" rx="2" ry="2" />
+<text  x="13.00" y="399.5" ></text>
+</g>
+<g >
+<title>__libc_close (1 samples, 0.02%)</title><rect x="143.6" y="277" width="0.2" height="15.0" fill="rgb(224,225,17)" rx="2" ry="2" />
+<text  x="146.61" y="287.5" ></text>
+</g>
+<g >
+<title>tokio::macros::scoped_tls::ScopedKey&lt;T&gt;::with (247 samples, 3.86%)</title><rect x="256.2" y="229" width="45.5" height="15.0" fill="rgb(242,42,39)" rx="2" ry="2" />
+<text  x="259.21" y="239.5" >toki..</text>
+</g>
+<g >
+<title>alloc::sync::Arc&lt;T&gt;::drop_slow (4 samples, 0.06%)</title><rect x="143.4" y="309" width="0.8" height="15.0" fill="rgb(218,0,8)" rx="2" ry="2" />
+<text  x="146.42" y="319.5" ></text>
+</g>
+<g >
+<title>futures_task::waker::clone_arc_raw (1 samples, 0.02%)</title><rect x="345.8" y="261" width="0.2" height="15.0" fill="rgb(248,163,5)" rx="2" ry="2" />
+<text  x="348.77" y="271.5" ></text>
+</g>
+<g >
+<title>&lt;std::sys::unix::time::Timespec as core::cmp::PartialOrd&gt;::partial_cmp (1 samples, 0.02%)</title><rect x="666.1" y="197" width="0.2" height="15.0" fill="rgb(240,171,2)" rx="2" ry="2" />
+<text  x="669.07" y="207.5" ></text>
+</g>
+<g >
+<title>core::time::Duration::new (1 samples, 0.02%)</title><rect x="591.4" y="69" width="0.2" height="15.0" fill="rgb(251,33,9)" rx="2" ry="2" />
+<text  x="594.43" y="79.5" ></text>
+</g>
+<g >
+<title>parking_lot::raw_mutex::RawMutex::lock_slow (5 samples, 0.08%)</title><rect x="300.4" y="197" width="1.0" height="15.0" fill="rgb(236,73,1)" rx="2" ry="2" />
+<text  x="303.44" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::net::tcp::stream::TcpStream as tokio::io::async_read::AsyncRead&gt;::poll_read (484 samples, 7.56%)</title><rect x="982.5" y="165" width="89.2" height="15.0" fill="rgb(233,135,44)" rx="2" ry="2" />
+<text  x="985.49" y="175.5" >&lt;tokio::ne..</text>
+</g>
+<g >
+<title>__GI___libc_malloc (1 samples, 0.02%)</title><rect x="42.8" y="293" width="0.2" height="15.0" fill="rgb(226,3,45)" rx="2" ry="2" />
+<text  x="45.80" y="303.5" ></text>
+</g>
+<g >
+<title>tokio::sync::mpsc::block::is_tx_closed (1 samples, 0.02%)</title><rect x="342.8" y="261" width="0.2" height="15.0" fill="rgb(211,154,28)" rx="2" ry="2" />
+<text  x="345.83" y="271.5" ></text>
+</g>
+<g >
+<title>parking_lot::raw_mutex::RawMutex::lock_slow (116 samples, 1.81%)</title><rect x="522.5" y="229" width="21.4" height="15.0" fill="rgb(240,51,19)" rx="2" ry="2" />
+<text  x="525.51" y="239.5" >p..</text>
+</g>
+<g >
+<title>tokio::sync::batch_semaphore::Semaphore::add_permits_locked (559 samples, 8.73%)</title><rect x="199.1" y="277" width="103.0" height="15.0" fill="rgb(229,202,31)" rx="2" ry="2" />
+<text  x="202.08" y="287.5" >tokio::sync:..</text>
+</g>
+<g >
+<title>std::thread::local::LocalKey&lt;T&gt;::with (2,770 samples, 43.26%)</title><rect x="679.5" y="213" width="510.5" height="15.0" fill="rgb(234,205,7)" rx="2" ry="2" />
+<text  x="682.52" y="223.5" >std::thread::local::LocalKey&lt;T&gt;::with</text>
+</g>
+<g >
+<title>__pthread_disable_asynccancel (16 samples, 0.25%)</title><rect x="1028.0" y="37" width="3.0" height="15.0" fill="rgb(235,222,49)" rx="2" ry="2" />
+<text  x="1031.01" y="47.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::time::inner::now (15 samples, 0.23%)</title><rect x="591.6" y="101" width="2.8" height="15.0" fill="rgb(249,160,13)" rx="2" ry="2" />
+<text  x="594.61" y="111.5" ></text>
+</g>
+<g >
+<title>tokio::time::driver::wheel::Wheel::poll (2 samples, 0.03%)</title><rect x="597.1" y="149" width="0.4" height="15.0" fill="rgb(246,197,31)" rx="2" ry="2" />
+<text  x="600.14" y="159.5" ></text>
+</g>
+<g >
+<title>tokio::loom::std::unsafe_cell::UnsafeCell&lt;T&gt;::with_mut (919 samples, 14.35%)</title><rect x="176.6" y="293" width="169.4" height="15.0" fill="rgb(219,43,11)" rx="2" ry="2" />
+<text  x="179.60" y="303.5" >tokio::loom::std::uns..</text>
+</g>
+<g >
+<title>_int_malloc (37 samples, 0.58%)</title><rect x="65.7" y="309" width="6.8" height="15.0" fill="rgb(250,209,11)" rx="2" ry="2" />
+<text  x="68.66" y="319.5" ></text>
+</g>
+<g >
+<title>std::time::Instant::duration_since (1 samples, 0.02%)</title><rect x="591.4" y="117" width="0.2" height="15.0" fill="rgb(237,86,23)" rx="2" ry="2" />
+<text  x="594.43" y="127.5" ></text>
+</g>
+<g >
+<title>tokio::sync::batch_semaphore::Semaphore::acquire (5 samples, 0.08%)</title><rect x="923.3" y="149" width="1.0" height="15.0" fill="rgb(234,203,3)" rx="2" ry="2" />
+<text  x="926.33" y="159.5" ></text>
+</g>
+<g >
+<title>__rust_alloc (3 samples, 0.05%)</title><rect x="1149.3" y="165" width="0.5" height="15.0" fill="rgb(215,14,25)" rx="2" ry="2" />
+<text  x="1152.27" y="175.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::waker::clone_waker (25 samples, 0.39%)</title><rect x="867.5" y="133" width="4.6" height="15.0" fill="rgb(236,224,19)" rx="2" ry="2" />
+<text  x="870.49" y="143.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::net::Socket::take_error (1 samples, 0.02%)</title><rect x="406.4" y="277" width="0.2" height="15.0" fill="rgb(247,56,19)" rx="2" ry="2" />
+<text  x="409.40" y="287.5" ></text>
+</g>
+<g >
+<title>__GI___clock_gettime (1 samples, 0.02%)</title><rect x="409.4" y="213" width="0.1" height="15.0" fill="rgb(209,5,32)" rx="2" ry="2" />
+<text  x="412.35" y="223.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::registration::Registration::poll_read_io (472 samples, 7.37%)</title><rect x="984.7" y="149" width="87.0" height="15.0" fill="rgb(236,118,5)" rx="2" ry="2" />
+<text  x="987.70" y="159.5" >tokio::io:..</text>
+</g>
+<g >
+<title>syscall (2 samples, 0.03%)</title><rect x="587.4" y="85" width="0.3" height="15.0" fill="rgb(235,182,53)" rx="2" ry="2" />
+<text  x="590.38" y="95.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc (79 samples, 1.23%)</title><rect x="57.9" y="325" width="14.6" height="15.0" fill="rgb(241,44,8)" rx="2" ry="2" />
+<text  x="60.92" y="335.5" ></text>
+</g>
+<g >
+<title>&lt;&amp;std::fs::File as std::io::Write&gt;::write (1 samples, 0.02%)</title><rect x="253.6" y="197" width="0.2" height="15.0" fill="rgb(237,123,29)" rx="2" ry="2" />
+<text  x="256.63" y="207.5" ></text>
+</g>
+<g >
+<title>core::ops::function::FnOnce::call_once$u7b$$u7b$vtable.shim$u7d$$u7d$::h7af2c173f35b9f21 (4,226 samples, 66.00%)</title><rect x="411.2" y="373" width="778.8" height="15.0" fill="rgb(254,59,6)" rx="2" ry="2" />
+<text  x="414.20" y="383.5" >core::ops::function::FnOnce::call_once$u7b$$u7b$vtable.shim$u7d$$u7d$::h7af2c173f35b9f21</text>
+</g>
+<g >
+<title>&lt;core::future::from_generator::GenFuture&lt;T&gt; as core::future::future::Future&gt;::poll (1,366 samples, 21.33%)</title><rect x="730.8" y="165" width="251.7" height="15.0" fill="rgb(211,37,32)" rx="2" ry="2" />
+<text  x="733.75" y="175.5" >&lt;core::future::from_generator::Ge..</text>
+</g>
+<g >
+<title>tokio::sync::batch_semaphore::Semaphore::add_permits_locked (38 samples, 0.59%)</title><rect x="872.1" y="133" width="7.0" height="15.0" fill="rgb(251,152,29)" rx="2" ry="2" />
+<text  x="875.10" y="143.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 0.08%)</title><rect x="255.3" y="213" width="0.9" height="15.0" fill="rgb(252,128,7)" rx="2" ry="2" />
+<text  x="258.29" y="223.5" ></text>
+</g>
+<g >
+<title>parking_lot_core::parking_lot::lock_bucket_pair (16 samples, 0.25%)</title><rect x="666.3" y="197" width="2.9" height="15.0" fill="rgb(215,107,15)" rx="2" ry="2" />
+<text  x="669.25" y="207.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc (3 samples, 0.05%)</title><rect x="969.4" y="117" width="0.6" height="15.0" fill="rgb(209,97,45)" rx="2" ry="2" />
+<text  x="972.41" y="127.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::registration::Registration::poll_ready (199 samples, 3.11%)</title><rect x="1035.0" y="133" width="36.7" height="15.0" fill="rgb(219,8,3)" rx="2" ry="2" />
+<text  x="1038.01" y="143.5" >tok..</text>
+</g>
+<g >
+<title>std::sys::unix::net::Socket::read (244 samples, 3.81%)</title><rect x="990.0" y="85" width="45.0" height="15.0" fill="rgb(214,102,16)" rx="2" ry="2" />
+<text  x="993.05" y="95.5" >std:..</text>
+</g>
+<g >
+<title>std::sys_common::net::TcpListener::take_error (1 samples, 0.02%)</title><rect x="406.4" y="293" width="0.2" height="15.0" fill="rgb(254,108,29)" rx="2" ry="2" />
+<text  x="409.40" y="303.5" ></text>
+</g>
+<g >
+<title>tokio::sync::batch_semaphore::Semaphore::add_permits_locked (40 samples, 0.62%)</title><rect x="1150.7" y="165" width="7.4" height="15.0" fill="rgb(214,52,45)" rx="2" ry="2" />
+<text  x="1153.75" y="175.5" ></text>
+</g>
+<g >
+<title>futures_task::arc_wake::ArcWake::wake (1 samples, 0.02%)</title><rect x="345.6" y="261" width="0.2" height="15.0" fill="rgb(254,87,27)" rx="2" ry="2" />
+<text  x="348.59" y="271.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::queue::Steal&lt;T&gt;::steal_into (66 samples, 1.03%)</title><rect x="543.9" y="229" width="12.1" height="15.0" fill="rgb(226,57,15)" rx="2" ry="2" />
+<text  x="546.88" y="239.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::scheduled_io::ScheduledIo::poll_readiness (5 samples, 0.08%)</title><rect x="589.2" y="133" width="0.9" height="15.0" fill="rgb(205,132,31)" rx="2" ry="2" />
+<text  x="592.22" y="143.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::state::State::transition_to_idle (13 samples, 0.20%)</title><rect x="1167.5" y="181" width="2.4" height="15.0" fill="rgb(230,108,45)" rx="2" ry="2" />
+<text  x="1170.52" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;core::future::from_generator::GenFuture&lt;T&gt; as core::future::future::Future&gt;::poll (2,574 samples, 40.20%)</title><rect x="690.6" y="181" width="474.3" height="15.0" fill="rgb(218,9,47)" rx="2" ry="2" />
+<text  x="693.58" y="191.5" >&lt;core::future::from_generator::GenFuture&lt;T&gt; as core::future::fut..</text>
+</g>
+<g >
+<title>std::sys::unix::thread::Thread::new::thread_start (4,226 samples, 66.00%)</title><rect x="411.2" y="421" width="778.8" height="15.0" fill="rgb(217,222,36)" rx="2" ry="2" />
+<text  x="414.20" y="431.5" >std::sys::unix::thread::Thread::new::thread_start</text>
+</g>
+<g >
+<title>&lt;alloc::collections::btree::map::BTreeMap&lt;K,V&gt; as core::ops::drop::Drop&gt;::drop (1 samples, 0.02%)</title><rect x="42.6" y="325" width="0.2" height="15.0" fill="rgb(220,147,16)" rx="2" ry="2" />
+<text  x="45.62" y="335.5" ></text>
+</g>
+<g >
+<title>core::ptr::drop_in_place$LT$$u5b$core..option..Option$LT$core..task..wake..Waker$GT$$u3b$$u20$32$u5d$$GT$::hdc1a76692e228511 (3 samples, 0.05%)</title><rect x="595.9" y="149" width="0.5" height="15.0" fill="rgb(208,108,36)" rx="2" ry="2" />
+<text  x="598.85" y="159.5" ></text>
+</g>
+<g >
+<title>mio::event::event::Event::token (1 samples, 0.02%)</title><rect x="581.8" y="149" width="0.2" height="15.0" fill="rgb(247,59,10)" rx="2" ry="2" />
+<text  x="584.85" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;&amp;std::fs::File as std::io::Write&gt;::write (1 samples, 0.02%)</title><rect x="408.6" y="245" width="0.2" height="15.0" fill="rgb(244,200,23)" rx="2" ry="2" />
+<text  x="411.62" y="255.5" ></text>
+</g>
+<g >
+<title>all (6,403 samples, 100%)</title><rect x="10.0" y="485" width="1180.0" height="15.0" fill="rgb(209,222,30)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" ></text>
+</g>
+<g >
+<title>&lt;core::panic::unwind_safe::AssertUnwindSafe&lt;F&gt; as core::ops::function::FnOnce&lt; (4,226 samples, 66.00%)</title><rect x="411.2" y="309" width="778.8" height="15.0" fill="rgb(240,205,20)" rx="2" ry="2" />
+<text  x="414.20" y="319.5" >&lt;core::panic::unwind_safe::AssertUnwindSafe&lt;F&gt; as core::ops::function::FnOnce&lt;</text>
+</g>
+<g >
+<title>__lll_unlock_wake_private (5 samples, 0.08%)</title><rect x="1110.4" y="149" width="0.9" height="15.0" fill="rgb(244,87,37)" rx="2" ry="2" />
+<text  x="1113.39" y="159.5" ></text>
+</g>
+<g >
+<title>tokio::park::thread::drop_waker (2 samples, 0.03%)</title><rect x="12.2" y="101" width="0.4" height="15.0" fill="rgb(207,194,15)" rx="2" ry="2" />
+<text  x="15.21" y="111.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::fd::FileDesc::write (2 samples, 0.03%)</title><rect x="657.0" y="149" width="0.4" height="15.0" fill="rgb(233,49,19)" rx="2" ry="2" />
+<text  x="660.04" y="159.5" ></text>
+</g>
+<g >
+<title>std::sys_common::net::getsockopt (1 samples, 0.02%)</title><rect x="406.4" y="261" width="0.2" height="15.0" fill="rgb(224,80,34)" rx="2" ry="2" />
+<text  x="409.40" y="271.5" ></text>
+</g>
+<g >
+<title>std::time::Instant::elapsed (17 samples, 0.27%)</title><rect x="591.2" y="149" width="3.2" height="15.0" fill="rgb(207,199,24)" rx="2" ry="2" />
+<text  x="594.25" y="159.5" ></text>
+</g>
+<g >
+<title>futures_util::stream::stream::StreamExt::poll_next_unpin (12 samples, 0.19%)</title><rect x="12.6" y="133" width="2.2" height="15.0" fill="rgb(254,39,35)" rx="2" ry="2" />
+<text  x="15.58" y="143.5" ></text>
+</g>
+<g >
+<title>futures_core::task::__internal::atomic_waker::AtomicWaker::wake (78 samples, 1.22%)</title><rect x="901.2" y="133" width="14.4" height="15.0" fill="rgb(240,45,16)" rx="2" ry="2" />
+<text  x="904.22" y="143.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::context::io_handle (1 samples, 0.02%)</title><rect x="407.1" y="293" width="0.2" height="15.0" fill="rgb(226,161,32)" rx="2" ry="2" />
+<text  x="410.14" y="303.5" ></text>
+</g>
+<g >
+<title>&lt;std::sys::unix::fd::FileDesc as std::os::fd::raw::AsRawFd&gt;::as_raw_fd (1 samples, 0.02%)</title><rect x="405.9" y="277" width="0.1" height="15.0" fill="rgb(225,100,20)" rx="2" ry="2" />
+<text  x="408.85" y="287.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait_private (2 samples, 0.03%)</title><rect x="1166.4" y="149" width="0.4" height="15.0" fill="rgb(216,204,28)" rx="2" ry="2" />
+<text  x="1169.41" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;core::future::from_generator::GenFuture&lt;T&gt; as core::future::future::Future&gt;::poll (2,126 samples, 33.20%)</title><rect x="19.4" y="389" width="391.8" height="15.0" fill="rgb(237,194,1)" rx="2" ry="2" />
+<text  x="22.40" y="399.5" >&lt;core::future::from_generator::GenFuture&lt;T&gt; as core::..</text>
+</g>
+<g >
+<title>&lt;alloc::boxed::Box&lt;F,A&gt; as core::ops::function::FnOnce&lt;Args&gt;&gt;::call_once (4,226 samples, 66.00%)</title><rect x="411.2" y="405" width="778.8" height="15.0" fill="rgb(238,183,14)" rx="2" ry="2" />
+<text  x="414.20" y="415.5" >&lt;alloc::boxed::Box&lt;F,A&gt; as core::ops::function::FnOnce&lt;Args&gt;&gt;::call_once</text>
+</g>
+<g >
+<title>tokio::sync::batch_semaphore::Semaphore::release (37 samples, 0.58%)</title><rect x="1158.1" y="165" width="6.8" height="15.0" fill="rgb(244,117,39)" rx="2" ry="2" />
+<text  x="1161.12" y="175.5" ></text>
+</g>
+<g >
+<title>__pthread_disable_asynccancel (1 samples, 0.02%)</title><rect x="143.6" y="261" width="0.2" height="15.0" fill="rgb(223,6,33)" rx="2" ry="2" />
+<text  x="146.61" y="271.5" ></text>
+</g>
+<g >
+<title>__GI_getsockopt (1 samples, 0.02%)</title><rect x="406.4" y="245" width="0.2" height="15.0" fill="rgb(224,129,21)" rx="2" ry="2" />
+<text  x="409.40" y="255.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::time::inner::now (23 samples, 0.36%)</title><rect x="669.2" y="165" width="4.2" height="15.0" fill="rgb(214,213,25)" rx="2" ry="2" />
+<text  x="672.20" y="175.5" ></text>
+</g>
+<g >
+<title>parking_lot::raw_mutex::RawMutex::lock_slow (1 samples, 0.02%)</title><rect x="254.2" y="213" width="0.2" height="15.0" fill="rgb(231,161,31)" rx="2" ry="2" />
+<text  x="257.18" y="223.5" ></text>
+</g>
+<g >
+<title>_int_free (1 samples, 0.02%)</title><rect x="42.6" y="309" width="0.2" height="15.0" fill="rgb(249,154,32)" rx="2" ry="2" />
+<text  x="45.62" y="319.5" ></text>
+</g>
+<g >
+<title>__GI___libc_free (1 samples, 0.02%)</title><rect x="900.7" y="133" width="0.2" height="15.0" fill="rgb(232,10,8)" rx="2" ry="2" />
+<text  x="903.67" y="143.5" ></text>
+</g>
+<g >
+<title>tcp_aggregation::main (51 samples, 0.80%)</title><rect x="10.0" y="229" width="9.4" height="15.0" fill="rgb(249,166,15)" rx="2" ry="2" />
+<text  x="13.00" y="239.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::inject::Inject&lt;T&gt;::push (164 samples, 2.56%)</title><rect x="257.9" y="213" width="30.2" height="15.0" fill="rgb(231,138,38)" rx="2" ry="2" />
+<text  x="260.87" y="223.5" >to..</text>
+</g>
+<g >
+<title>tokio::loom::std::unsafe_cell::UnsafeCell&lt;T&gt;::with_mut (6 samples, 0.09%)</title><rect x="1164.9" y="181" width="1.1" height="15.0" fill="rgb(250,177,44)" rx="2" ry="2" />
+<text  x="1167.94" y="191.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::scheduled_io::ScheduledIo::poll_readiness (25 samples, 0.39%)</title><rect x="1067.1" y="117" width="4.6" height="15.0" fill="rgb(244,215,4)" rx="2" ry="2" />
+<text  x="1070.08" y="127.5" ></text>
+</g>
+<g >
+<title>std::time::Instant::now (15 samples, 0.23%)</title><rect x="591.6" y="133" width="2.8" height="15.0" fill="rgb(245,34,14)" rx="2" ry="2" />
+<text  x="594.61" y="143.5" ></text>
+</g>
+<g >
+<title>mio::poll::Poll::poll (16 samples, 0.25%)</title><rect x="582.0" y="149" width="3.0" height="15.0" fill="rgb(229,124,49)" rx="2" ry="2" />
+<text  x="585.03" y="159.5" ></text>
+</g>
+<g >
+<title>core::ptr::drop_in_place&lt;alloc::boxed::Box&lt;tcp_aggregation::BufferedSource&gt;&gt; (7 samples, 0.11%)</title><rect x="142.9" y="325" width="1.3" height="15.0" fill="rgb(239,116,36)" rx="2" ry="2" />
+<text  x="145.87" y="335.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::time::driver::sleep::Sleep as core::future::future::Future&gt;::poll (10 samples, 0.16%)</title><rect x="10.7" y="133" width="1.9" height="15.0" fill="rgb(244,50,25)" rx="2" ry="2" />
+<text  x="13.74" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::io::poll_evented::PollEvented&lt;E&gt; as core::ops::drop::Drop&gt;::drop (2 samples, 0.03%)</title><rect x="143.6" y="293" width="0.4" height="15.0" fill="rgb(214,47,45)" rx="2" ry="2" />
+<text  x="146.61" y="303.5" ></text>
+</g>
+<g >
+<title>tokio::park::thread::Inner::park (22 samples, 0.34%)</title><rect x="15.3" y="149" width="4.1" height="15.0" fill="rgb(235,96,4)" rx="2" ry="2" />
+<text  x="18.34" y="159.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::thread_pool::worker::CURRENT::FOO::__getit (2 samples, 0.03%)</title><rect x="301.4" y="213" width="0.3" height="15.0" fill="rgb(251,87,7)" rx="2" ry="2" />
+<text  x="304.36" y="223.5" ></text>
+</g>
+<g >
+<title>tokio::util::slab::Allocator&lt;T&gt;::allocate (1 samples, 0.02%)</title><rect x="407.0" y="261" width="0.1" height="15.0" fill="rgb(234,192,15)" rx="2" ry="2" />
+<text  x="409.96" y="271.5" ></text>
+</g>
+<g >
+<title>__libc_write (2 samples, 0.03%)</title><rect x="657.0" y="133" width="0.4" height="15.0" fill="rgb(221,19,23)" rx="2" ry="2" />
+<text  x="660.04" y="143.5" ></text>
+</g>
+<g >
+<title>tokio::time::driver::wheel::level::Level::next_expiration (2 samples, 0.03%)</title><rect x="597.7" y="149" width="0.4" height="15.0" fill="rgb(214,142,16)" rx="2" ry="2" />
+<text  x="600.70" y="159.5" ></text>
+</g>
+<g >
+<title>std::panicking::try (51 samples, 0.80%)</title><rect x="10.0" y="373" width="9.4" height="15.0" fill="rgb(238,211,20)" rx="2" ry="2" />
+<text  x="13.00" y="383.5" ></text>
+</g>
+<g >
+<title>futures_task::arc_wake::ArcWake::wake (5 samples, 0.08%)</title><rect x="586.8" y="133" width="0.9" height="15.0" fill="rgb(212,166,23)" rx="2" ry="2" />
+<text  x="589.82" y="143.5" ></text>
+</g>
+<g >
+<title>futures_util::stream::futures_unordered::FuturesUnordered&lt;Fut&gt;::push (1 samples, 0.02%)</title><rect x="411.0" y="373" width="0.2" height="15.0" fill="rgb(247,159,2)" rx="2" ry="2" />
+<text  x="414.01" y="383.5" ></text>
+</g>
+<g >
+<title>futures_task::waker::drop_arc_raw (13 samples, 0.20%)</title><rect x="401.8" y="293" width="2.4" height="15.0" fill="rgb(222,46,33)" rx="2" ry="2" />
+<text  x="404.80" y="303.5" ></text>
+</g>
+<g >
+<title>std::time::Instant::checked_duration_since (1 samples, 0.02%)</title><rect x="578.2" y="165" width="0.1" height="15.0" fill="rgb(249,137,48)" rx="2" ry="2" />
+<text  x="581.16" y="175.5" ></text>
+</g>
+<g >
+<title>core::tuple::&lt;impl core::cmp::Ord for  (1 samples, 0.02%)</title><rect x="666.1" y="165" width="0.2" height="15.0" fill="rgb(226,68,12)" rx="2" ry="2" />
+<text  x="669.07" y="175.5" ></text>
+</g>
+<g >
+<title>tokio::task::spawn::spawn (10 samples, 0.16%)</title><rect x="408.1" y="325" width="1.8" height="15.0" fill="rgb(214,194,45)" rx="2" ry="2" />
+<text  x="411.06" y="335.5" ></text>
+</g>
+<g >
+<title>tokio::macros::scoped_tls::ScopedKey&lt;T&gt;::with (1 samples, 0.02%)</title><rect x="409.7" y="277" width="0.2" height="15.0" fill="rgb(224,96,47)" rx="2" ry="2" />
+<text  x="412.72" y="287.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::time::inner::Instant::checked_sub_instant (1 samples, 0.02%)</title><rect x="591.4" y="101" width="0.2" height="15.0" fill="rgb(247,31,48)" rx="2" ry="2" />
+<text  x="594.43" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;&amp;mio::event::events::Events as core::iter::traits::collect::IntoIterator&gt;::into_iter (1 samples, 0.02%)</title><rect x="581.3" y="149" width="0.2" height="15.0" fill="rgb(211,27,42)" rx="2" ry="2" />
+<text  x="584.29" y="159.5" ></text>
+</g>
+<g >
+<title>&lt; (1 samples, 0.02%)</title><rect x="142.9" y="293" width="0.2" height="15.0" fill="rgb(211,115,49)" rx="2" ry="2" />
+<text  x="145.87" y="303.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::io::driver::Handle as tokio::park::Unpark&gt;::unpark (1 samples, 0.02%)</title><rect x="253.6" y="229" width="0.2" height="15.0" fill="rgb(206,105,4)" rx="2" ry="2" />
+<text  x="256.63" y="239.5" ></text>
+</g>
+<g >
+<title>tokio::coop::CURRENT::__getit (1 samples, 0.02%)</title><rect x="176.4" y="277" width="0.2" height="15.0" fill="rgb(226,162,9)" rx="2" ry="2" />
+<text  x="179.41" y="287.5" ></text>
+</g>
+<g >
+<title>__libc_disable_asynccancel (3 samples, 0.05%)</title><rect x="584.4" y="117" width="0.6" height="15.0" fill="rgb(254,189,51)" rx="2" ry="2" />
+<text  x="587.43" y="127.5" ></text>
+</g>
+<g >
+<title>__GI___sched_yield (2 samples, 0.03%)</title><rect x="543.5" y="213" width="0.4" height="15.0" fill="rgb(245,229,47)" rx="2" ry="2" />
+<text  x="546.52" y="223.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::Handle::inner (1 samples, 0.02%)</title><rect x="143.8" y="261" width="0.2" height="15.0" fill="rgb(219,92,9)" rx="2" ry="2" />
+<text  x="146.79" y="271.5" ></text>
+</g>
+<g >
+<title>std::time::Instant::elapsed (2 samples, 0.03%)</title><rect x="643.2" y="149" width="0.4" height="15.0" fill="rgb(244,77,29)" rx="2" ry="2" />
+<text  x="646.22" y="159.5" ></text>
+</g>
+<g >
+<title>&lt; (104 samples, 1.62%)</title><rect x="179.7" y="277" width="19.2" height="15.0" fill="rgb(223,199,11)" rx="2" ry="2" />
+<text  x="182.73" y="287.5" ></text>
+</g>
+<g >
+<title>__GI___clock_gettime (15 samples, 0.23%)</title><rect x="591.6" y="85" width="2.8" height="15.0" fill="rgb(221,66,19)" rx="2" ry="2" />
+<text  x="594.61" y="95.5" ></text>
+</g>
+<g >
+<title>__rust_alloc (1 samples, 0.02%)</title><rect x="72.8" y="325" width="0.2" height="15.0" fill="rgb(225,148,54)" rx="2" ry="2" />
+<text  x="75.84" y="335.5" ></text>
+</g>
+<g >
+<title>__GI___libc_free (81 samples, 1.27%)</title><rect x="43.0" y="325" width="14.9" height="15.0" fill="rgb(224,120,22)" rx="2" ry="2" />
+<text  x="45.99" y="335.5" ></text>
+</g>
+<g >
+<title>parking_lot::raw_mutex::RawMutex::lock_slow (1 samples, 0.02%)</title><rect x="198.7" y="261" width="0.2" height="15.0" fill="rgb(208,54,20)" rx="2" ry="2" />
+<text  x="201.71" y="271.5" ></text>
+</g>
+<g >
+<title>parking_lot::condvar::Condvar::notify_one_slow (104 samples, 1.62%)</title><rect x="660.4" y="213" width="19.1" height="15.0" fill="rgb(251,128,49)" rx="2" ry="2" />
+<text  x="663.35" y="223.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait_private (12 samples, 0.19%)</title><rect x="129.1" y="309" width="2.2" height="15.0" fill="rgb(225,104,3)" rx="2" ry="2" />
+<text  x="132.05" y="319.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc (412 samples, 6.43%)</title><rect x="1071.7" y="165" width="75.9" height="15.0" fill="rgb(250,211,38)" rx="2" ry="2" />
+<text  x="1074.69" y="175.5" >__GI___l..</text>
+</g>
+<g >
+<title>mio::sys::unix::waker::eventfd::Waker::wake (3 samples, 0.05%)</title><rect x="656.9" y="197" width="0.5" height="15.0" fill="rgb(245,84,10)" rx="2" ry="2" />
+<text  x="659.85" y="207.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::waker::wake_by_val (2 samples, 0.03%)</title><rect x="301.7" y="261" width="0.4" height="15.0" fill="rgb(241,185,21)" rx="2" ry="2" />
+<text  x="304.73" y="271.5" ></text>
+</g>
+<g >
+<title>&lt;&amp;mio::net::tcp::stream::TcpStream as std::io::Read&gt;::read (254 samples, 3.97%)</title><rect x="988.2" y="133" width="46.8" height="15.0" fill="rgb(243,165,24)" rx="2" ry="2" />
+<text  x="991.20" y="143.5" >&lt;&amp;mi..</text>
+</g>
+<g >
+<title>std::panicking::try::do_call (51 samples, 0.80%)</title><rect x="10.0" y="357" width="9.4" height="15.0" fill="rgb(224,184,30)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::alloc::&lt;impl core::alloc::global::GlobalAlloc for std::alloc::System&gt;::dealloc (2 samples, 0.03%)</title><rect x="360.9" y="277" width="0.4" height="15.0" fill="rgb(210,32,37)" rx="2" ry="2" />
+<text  x="363.89" y="287.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::state::State::ref_inc (19 samples, 0.30%)</title><rect x="868.6" y="117" width="3.5" height="15.0" fill="rgb(216,58,27)" rx="2" ry="2" />
+<text  x="871.60" y="127.5" ></text>
+</g>
+<g >
+<title>std::time::Instant::now (1 samples, 0.02%)</title><rect x="643.4" y="133" width="0.2" height="15.0" fill="rgb(240,174,35)" rx="2" ry="2" />
+<text  x="646.40" y="143.5" ></text>
+</g>
+<g >
+<title>__rust_dealloc (2 samples, 0.03%)</title><rect x="361.3" y="293" width="0.3" height="15.0" fill="rgb(242,89,25)" rx="2" ry="2" />
+<text  x="364.25" y="303.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::context::spawn_handle (1 samples, 0.02%)</title><rect x="408.1" y="309" width="0.1" height="15.0" fill="rgb(247,20,33)" rx="2" ry="2" />
+<text  x="411.06" y="319.5" ></text>
+</g>
+<g >
+<title>tokio::park::thread::CachedParkThread::block_on (51 samples, 0.80%)</title><rect x="10.0" y="181" width="9.4" height="15.0" fill="rgb(240,92,27)" rx="2" ry="2" />
+<text  x="13.00" y="191.5" ></text>
+</g>
+<g >
+<title>tokio::sync::batch_semaphore::Semaphore::release (2 samples, 0.03%)</title><rect x="407.3" y="325" width="0.4" height="15.0" fill="rgb(226,206,19)" rx="2" ry="2" />
+<text  x="410.33" y="335.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::thread_pool::worker::Context::run_task (2,963 samples, 46.28%)</title><rect x="644.0" y="229" width="546.0" height="15.0" fill="rgb(210,78,44)" rx="2" ry="2" />
+<text  x="646.95" y="239.5" >tokio::runtime::thread_pool::worker::Context::run_task</text>
+</g>
+<g >
+<title>epoll_wait (14 samples, 0.22%)</title><rect x="582.4" y="133" width="2.6" height="15.0" fill="rgb(212,25,38)" rx="2" ry="2" />
+<text  x="585.40" y="143.5" ></text>
+</g>
+<g >
+<title>tokio::time::driver::wheel::Wheel::next_expiration (1 samples, 0.02%)</title><rect x="643.6" y="149" width="0.2" height="15.0" fill="rgb(230,225,7)" rx="2" ry="2" />
+<text  x="646.58" y="159.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::time::Timespec::sub_timespec (1 samples, 0.02%)</title><rect x="643.2" y="85" width="0.2" height="15.0" fill="rgb(253,200,44)" rx="2" ry="2" />
+<text  x="646.22" y="95.5" ></text>
+</g>
+<g >
+<title>tokio::io::poll_evented::PollEvented&lt;E&gt;::new (2 samples, 0.03%)</title><rect x="407.0" y="309" width="0.3" height="15.0" fill="rgb(214,49,28)" rx="2" ry="2" />
+<text  x="409.96" y="319.5" ></text>
+</g>
+<g >
+<title>tokio::time::driver::wheel::Wheel::next_expiration (1 samples, 0.02%)</title><rect x="643.8" y="165" width="0.2" height="15.0" fill="rgb(232,37,19)" rx="2" ry="2" />
+<text  x="646.77" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::coop::RestoreOnPending as core::ops::drop::Drop&gt;::drop (2 samples, 0.03%)</title><rect x="173.6" y="293" width="0.4" height="15.0" fill="rgb(234,1,6)" rx="2" ry="2" />
+<text  x="176.65" y="303.5" ></text>
+</g>
+<g >
+<title>std::panicking::try::do_call (51 samples, 0.80%)</title><rect x="10.0" y="293" width="9.4" height="15.0" fill="rgb(212,140,3)" rx="2" ry="2" />
+<text  x="13.00" y="303.5" ></text>
+</g>
+<g >
+<title>tokio::time::clock::Clock::now (23 samples, 0.36%)</title><rect x="590.1" y="165" width="4.3" height="15.0" fill="rgb(205,2,34)" rx="2" ry="2" />
+<text  x="593.14" y="175.5" ></text>
+</g>
+<g >
+<title>tokio::sync::mpsc::list::Rx&lt;T&gt;::pop (222 samples, 3.47%)</title><rect x="302.1" y="277" width="40.9" height="15.0" fill="rgb(216,92,31)" rx="2" ry="2" />
+<text  x="305.10" y="287.5" >tok..</text>
+</g>
+<g >
+<title>&lt;&amp;std::net::tcp::TcpStream as std::io::Read&gt;::read (250 samples, 3.90%)</title><rect x="988.9" y="117" width="46.1" height="15.0" fill="rgb(205,70,6)" rx="2" ry="2" />
+<text  x="991.94" y="127.5" >&lt;&amp;st..</text>
+</g>
+<g >
+<title>tokio::macros::scoped_tls::ScopedKey&lt;T&gt;::set (4,226 samples, 66.00%)</title><rect x="411.2" y="261" width="778.8" height="15.0" fill="rgb(234,149,20)" rx="2" ry="2" />
+<text  x="414.20" y="271.5" >tokio::macros::scoped_tls::ScopedKey&lt;T&gt;::set</text>
+</g>
+<g >
+<title>std::sys_common::backtrace::__rust_begin_short_backtrace (51 samples, 0.80%)</title><rect x="10.0" y="245" width="9.4" height="15.0" fill="rgb(254,125,38)" rx="2" ry="2" />
+<text  x="13.00" y="255.5" ></text>
+</g>
+<g >
+<title>mio::sys::unix::tcp::connect (3 samples, 0.05%)</title><rect x="405.9" y="309" width="0.5" height="15.0" fill="rgb(211,156,46)" rx="2" ry="2" />
+<text  x="408.85" y="319.5" ></text>
+</g>
+<g >
+<title>tokio::time::driver::Driver&lt;P&gt;::park_internal (8 samples, 0.12%)</title><rect x="642.5" y="181" width="1.5" height="15.0" fill="rgb(213,49,33)" rx="2" ry="2" />
+<text  x="645.48" y="191.5" ></text>
+</g>
+<g >
+<title>std::panicking::try (51 samples, 0.80%)</title><rect x="10.0" y="309" width="9.4" height="15.0" fill="rgb(222,225,25)" rx="2" ry="2" />
+<text  x="13.00" y="319.5" ></text>
+</g>
+<g >
+<title>_int_malloc (2 samples, 0.03%)</title><rect x="407.7" y="293" width="0.4" height="15.0" fill="rgb(205,221,22)" rx="2" ry="2" />
+<text  x="410.69" y="303.5" ></text>
+</g>
+<g >
+<title>tokio::time::driver::wheel::Wheel::next_expiration (3 samples, 0.05%)</title><rect x="597.5" y="165" width="0.6" height="15.0" fill="rgb(222,141,33)" rx="2" ry="2" />
+<text  x="600.51" y="175.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::spawner::Spawner::spawn (9 samples, 0.14%)</title><rect x="408.2" y="309" width="1.7" height="15.0" fill="rgb(216,55,20)" rx="2" ry="2" />
+<text  x="411.25" y="319.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::runtime::park::Parker as tokio::park::Park&gt;::park (454 samples, 7.09%)</title><rect x="557.9" y="213" width="83.7" height="15.0" fill="rgb(222,149,19)" rx="2" ry="2" />
+<text  x="560.89" y="223.5" >&lt;tokio::r..</text>
+</g>
+<g >
+<title>syscall (33 samples, 0.52%)</title><rect x="673.4" y="197" width="6.1" height="15.0" fill="rgb(226,127,34)" rx="2" ry="2" />
+<text  x="676.44" y="207.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::list::OwnedTasks&lt;S&gt;::bind (2 samples, 0.03%)</title><rect x="408.2" y="293" width="0.4" height="15.0" fill="rgb(242,87,10)" rx="2" ry="2" />
+<text  x="411.25" y="303.5" ></text>
+</g>
+<g >
+<title>parking_lot::condvar::Condvar::notify_one_slow (3 samples, 0.05%)</title><rect x="587.2" y="101" width="0.5" height="15.0" fill="rgb(240,225,51)" rx="2" ry="2" />
+<text  x="590.19" y="111.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::time::inner::Instant::checked_sub_instant (1 samples, 0.02%)</title><rect x="578.2" y="149" width="0.1" height="15.0" fill="rgb(210,52,1)" rx="2" ry="2" />
+<text  x="581.16" y="159.5" ></text>
+</g>
+<g >
+<title>tokio::sync::notify::Notify::notify_waiters (1 samples, 0.02%)</title><rect x="143.1" y="293" width="0.1" height="15.0" fill="rgb(223,145,33)" rx="2" ry="2" />
+<text  x="146.06" y="303.5" ></text>
+</g>
+<g >
+<title>_int_free (5 samples, 0.08%)</title><rect x="1166.0" y="165" width="1.0" height="15.0" fill="rgb(241,18,54)" rx="2" ry="2" />
+<text  x="1169.04" y="175.5" ></text>
+</g>
+<g >
+<title>parking_lot_core::parking_lot::lock_bucket_pair (1 samples, 0.02%)</title><rect x="255.1" y="213" width="0.2" height="15.0" fill="rgb(218,224,45)" rx="2" ry="2" />
+<text  x="258.10" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::runtime::park::Unparker as tokio::park::Unpark&gt;::unpark (3 samples, 0.05%)</title><rect x="253.8" y="229" width="0.6" height="15.0" fill="rgb(247,42,32)" rx="2" ry="2" />
+<text  x="256.81" y="239.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (1 samples, 0.02%)</title><rect x="407.9" y="277" width="0.2" height="15.0" fill="rgb(251,213,29)" rx="2" ry="2" />
+<text  x="410.88" y="287.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait_private (5 samples, 0.08%)</title><rect x="1109.5" y="149" width="0.9" height="15.0" fill="rgb(209,66,49)" rx="2" ry="2" />
+<text  x="1112.47" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::sync::mpsc::chan::Rx&lt;T,S&gt; as core::ops::drop::Drop&gt;::drop (2 samples, 0.03%)</title><rect x="142.9" y="309" width="0.3" height="15.0" fill="rgb(223,16,22)" rx="2" ry="2" />
+<text  x="145.87" y="319.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::runtime::park::Parker as tokio::park::Park&gt;::park_timeout (13 samples, 0.20%)</title><rect x="641.6" y="213" width="2.4" height="15.0" fill="rgb(232,49,46)" rx="2" ry="2" />
+<text  x="644.56" y="223.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::time::inner::now (1 samples, 0.02%)</title><rect x="643.4" y="101" width="0.2" height="15.0" fill="rgb(231,65,29)" rx="2" ry="2" />
+<text  x="646.40" y="111.5" ></text>
+</g>
+<g >
+<title>syscall (173 samples, 2.70%)</title><rect x="609.7" y="181" width="31.9" height="15.0" fill="rgb(218,100,14)" rx="2" ry="2" />
+<text  x="612.68" y="191.5" >sy..</text>
+</g>
+<g >
+<title>_int_free (87 samples, 1.36%)</title><rect x="361.6" y="293" width="16.1" height="15.0" fill="rgb(222,92,47)" rx="2" ry="2" />
+<text  x="364.62" y="303.5" ></text>
+</g>
+<g >
+<title>&lt;core::future::from_generator::GenFuture&lt;T&gt; as core::future::future::Future&gt;::poll (2,125 samples, 33.19%)</title><rect x="19.4" y="341" width="391.6" height="15.0" fill="rgb(217,86,35)" rx="2" ry="2" />
+<text  x="22.40" y="351.5" >&lt;core::future::from_generator::GenFuture&lt;T&gt; as core::..</text>
+</g>
+<g >
+<title>std::rt::lang_start::_$u7b$$u7b$closure$u7d$$u7d$::h9880c3f557b9ced0 (51 samples, 0.80%)</title><rect x="10.0" y="261" width="9.4" height="15.0" fill="rgb(226,50,22)" rx="2" ry="2" />
+<text  x="13.00" y="271.5" ></text>
+</g>
+<g >
+<title>__libc_write (1 samples, 0.02%)</title><rect x="408.6" y="197" width="0.2" height="15.0" fill="rgb(209,64,24)" rx="2" ry="2" />
+<text  x="411.62" y="207.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::thread_pool::worker::run (4,226 samples, 66.00%)</title><rect x="411.2" y="277" width="778.8" height="15.0" fill="rgb(225,217,8)" rx="2" ry="2" />
+<text  x="414.20" y="287.5" >tokio::runtime::thread_pool::worker::run</text>
+</g>
+<g >
+<title>std::sys::unix::net::Socket::recv_with_flags (244 samples, 3.81%)</title><rect x="990.0" y="69" width="45.0" height="15.0" fill="rgb(217,175,37)" rx="2" ry="2" />
+<text  x="993.05" y="79.5" >std:..</text>
+</g>
+<g >
+<title>__lll_lock_wait_private (2 samples, 0.03%)</title><rect x="377.3" y="277" width="0.4" height="15.0" fill="rgb(239,71,51)" rx="2" ry="2" />
+<text  x="380.29" y="287.5" ></text>
+</g>
+<g >
+<title>_int_free (1 samples, 0.02%)</title><rect x="144.0" y="293" width="0.2" height="15.0" fill="rgb(232,48,11)" rx="2" ry="2" />
+<text  x="146.98" y="303.5" ></text>
+</g>
+<g >
+<title>tokio::park::thread::CachedParkThread::block_on (2,126 samples, 33.20%)</title><rect x="19.4" y="405" width="391.8" height="15.0" fill="rgb(232,100,37)" rx="2" ry="2" />
+<text  x="22.40" y="415.5" >tokio::park::thread::CachedParkThread::block_on</text>
+</g>
+<g >
+<title>std::sys::unix::time::inner::Instant::now (23 samples, 0.36%)</title><rect x="669.2" y="181" width="4.2" height="15.0" fill="rgb(233,154,40)" rx="2" ry="2" />
+<text  x="672.20" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter::SpecFromIter&lt;T,I&gt;&gt;::from_iter (1 samples, 0.02%)</title><rect x="42.8" y="325" width="0.2" height="15.0" fill="rgb(229,98,27)" rx="2" ry="2" />
+<text  x="45.80" y="335.5" ></text>
+</g>
+<g >
+<title>&lt;std::sys::unix::fs::File as std::os::fd::raw::AsRawFd&gt;::as_raw_fd (1 samples, 0.02%)</title><rect x="405.9" y="293" width="0.1" height="15.0" fill="rgb(240,60,6)" rx="2" ry="2" />
+<text  x="408.85" y="303.5" ></text>
+</g>
+<g >
+<title>__libc_start_main (51 samples, 0.80%)</title><rect x="10.0" y="437" width="9.4" height="15.0" fill="rgb(221,34,22)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" ></text>
+</g>
+<g >
+<title>std::sys_common::net::TcpStream::read (244 samples, 3.81%)</title><rect x="990.0" y="101" width="45.0" height="15.0" fill="rgb(228,164,30)" rx="2" ry="2" />
+<text  x="993.05" y="111.5" >std:..</text>
+</g>
+<g >
+<title>&lt;tokio::future::poll_fn::PollFn&lt;F&gt; as core::future::future::Future&gt;::poll (2,125 samples, 33.19%)</title><rect x="19.4" y="373" width="391.6" height="15.0" fill="rgb(227,229,40)" rx="2" ry="2" />
+<text  x="22.40" y="383.5" >&lt;tokio::future::poll_fn::PollFn&lt;F&gt; as core::future::f..</text>
+</g>
+<g >
+<title>parking_lot::condvar::Condvar::notify_one_slow (8 samples, 0.12%)</title><rect x="921.3" y="101" width="1.5" height="15.0" fill="rgb(219,152,7)" rx="2" ry="2" />
+<text  x="924.31" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;std::time::Instant as core::ops::arith::Sub&gt;::sub (1 samples, 0.02%)</title><rect x="643.2" y="133" width="0.2" height="15.0" fill="rgb(229,208,41)" rx="2" ry="2" />
+<text  x="646.22" y="143.5" ></text>
+</g>
+<g >
+<title>std::sys_common::backtrace::__rust_begin_short_backtrace (4,226 samples, 66.00%)</title><rect x="411.2" y="357" width="778.8" height="15.0" fill="rgb(210,204,26)" rx="2" ry="2" />
+<text  x="414.20" y="367.5" >std::sys_common::backtrace::__rust_begin_short_backtrace</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 0.02%)</title><rect x="42.8" y="277" width="0.2" height="15.0" fill="rgb(215,195,27)" rx="2" ry="2" />
+<text  x="45.80" y="287.5" ></text>
+</g>
+<g >
+<title>mio::net::tcp::stream::TcpStream::connect (3 samples, 0.05%)</title><rect x="405.9" y="325" width="0.5" height="15.0" fill="rgb(225,9,39)" rx="2" ry="2" />
+<text  x="408.85" y="335.5" ></text>
+</g>
+<g >
+<title>start_thread (4,226 samples, 66.00%)</title><rect x="411.2" y="437" width="778.8" height="15.0" fill="rgb(247,86,45)" rx="2" ry="2" />
+<text  x="414.20" y="447.5" >start_thread</text>
+</g>
+<g >
+<title>tokio::park::thread::wake_by_ref (2 samples, 0.03%)</title><rect x="14.4" y="117" width="0.4" height="15.0" fill="rgb(230,132,19)" rx="2" ry="2" />
+<text  x="17.42" y="127.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::state::State::transition_to_notified_by_val (57 samples, 0.89%)</title><rect x="242.2" y="245" width="10.5" height="15.0" fill="rgb(216,210,8)" rx="2" ry="2" />
+<text  x="245.20" y="255.5" ></text>
+</g>
+<g >
+<title>futures_task::arc_wake::ArcWake::wake (1 samples, 0.02%)</title><rect x="345.6" y="245" width="0.2" height="15.0" fill="rgb(213,138,19)" rx="2" ry="2" />
+<text  x="348.59" y="255.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::scheduled_io::ScheduledIo::wake0 (1 samples, 0.02%)</title><rect x="642.8" y="149" width="0.2" height="15.0" fill="rgb(233,155,39)" rx="2" ry="2" />
+<text  x="645.85" y="159.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::blocking::pool::Inner::run (4,226 samples, 66.00%)</title><rect x="411.2" y="341" width="778.8" height="15.0" fill="rgb(239,76,46)" rx="2" ry="2" />
+<text  x="414.20" y="351.5" >tokio::runtime::blocking::pool::Inner::run</text>
+</g>
+<g >
+<title>&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::fold (1 samples, 0.02%)</title><rect x="42.8" y="309" width="0.2" height="15.0" fill="rgb(218,210,19)" rx="2" ry="2" />
+<text  x="45.80" y="319.5" ></text>
+</g>
+<g >
+<title>mio::event::event::Event::is_writable (1 samples, 0.02%)</title><rect x="581.7" y="149" width="0.1" height="15.0" fill="rgb(219,165,26)" rx="2" ry="2" />
+<text  x="584.66" y="159.5" ></text>
+</g>
+<g >
+<title>syscall (14 samples, 0.22%)</title><rect x="16.8" y="117" width="2.6" height="15.0" fill="rgb(248,134,17)" rx="2" ry="2" />
+<text  x="19.82" y="127.5" ></text>
+</g>
+<g >
+<title>mio::event::event::Event::is_read_closed (1 samples, 0.02%)</title><rect x="581.5" y="149" width="0.2" height="15.0" fill="rgb(226,57,13)" rx="2" ry="2" />
+<text  x="584.48" y="159.5" ></text>
+</g>
+<g >
+<title>tokio::io::read_buf::slice_assume_init_mut (1 samples, 0.02%)</title><rect x="1150.6" y="165" width="0.1" height="15.0" fill="rgb(246,214,19)" rx="2" ry="2" />
+<text  x="1153.56" y="175.5" ></text>
+</g>
+<g >
+<title>parking_lot::raw_mutex::RawMutex::lock_slow (50 samples, 0.78%)</title><rect x="278.9" y="197" width="9.2" height="15.0" fill="rgb(244,57,36)" rx="2" ry="2" />
+<text  x="281.88" y="207.5" ></text>
+</g>
+<g >
+<title>core::ptr::drop_in_place$LT$$LT$futures_util..stream..futures_unordered..FuturesUnordered$LT$Fut$GT$$u20$as$u20$futures_core..stream..Stream$GT$..poll_next..Bomb$LT$core..future..from_generator..GenFuture$LT$tcp_aggregation..read_from_source..$u7b$$u7b$closure$u7d$$u7d$$GT$$GT$$GT$::h86764f269f98b492 (204 samples, 3.19%)</title><rect x="346.1" y="309" width="37.6" height="15.0" fill="rgb(211,32,52)" rx="2" ry="2" />
+<text  x="349.14" y="319.5" >cor..</text>
+</g>
+<g >
+<title>futures_task::waker::wake_by_ref_arc_raw (3 samples, 0.05%)</title><rect x="405.1" y="309" width="0.6" height="15.0" fill="rgb(213,165,33)" rx="2" ry="2" />
+<text  x="408.11" y="319.5" ></text>
+</g>
+<g >
+<title>_start (51 samples, 0.80%)</title><rect x="10.0" y="453" width="9.4" height="15.0" fill="rgb(215,146,10)" rx="2" ry="2" />
+<text  x="13.00" y="463.5" ></text>
+</g>
+<g >
+<title>mio::net::tcp::stream::TcpStream::take_error (1 samples, 0.02%)</title><rect x="406.4" y="325" width="0.2" height="15.0" fill="rgb(242,140,19)" rx="2" ry="2" />
+<text  x="409.40" y="335.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::io::driver::Handle as tokio::park::Unpark&gt;::unpark (5 samples, 0.08%)</title><rect x="656.5" y="213" width="0.9" height="15.0" fill="rgb(215,65,53)" rx="2" ry="2" />
+<text  x="659.48" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;alloc::boxed::Box&lt;F,A&gt; as core::ops::function::FnOnce&lt;Args&gt;&gt;::call_once (4,226 samples, 66.00%)</title><rect x="411.2" y="389" width="778.8" height="15.0" fill="rgb(230,180,0)" rx="2" ry="2" />
+<text  x="414.20" y="399.5" >&lt;alloc::boxed::Box&lt;F,A&gt; as core::ops::function::FnOnce&lt;Args&gt;&gt;::call_once</text>
+</g>
+<g >
+<title>tokio::runtime::task::list::OwnedTasks&lt;S&gt;::remove (2 samples, 0.03%)</title><rect x="1167.0" y="165" width="0.3" height="15.0" fill="rgb(223,113,11)" rx="2" ry="2" />
+<text  x="1169.96" y="175.5" ></text>
+</g>
+<g >
+<title>std::time::Instant::now (23 samples, 0.36%)</title><rect x="669.2" y="197" width="4.2" height="15.0" fill="rgb(214,102,4)" rx="2" ry="2" />
+<text  x="672.20" y="207.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::fs::File::write (1 samples, 0.02%)</title><rect x="408.6" y="229" width="0.2" height="15.0" fill="rgb(243,183,35)" rx="2" ry="2" />
+<text  x="411.62" y="239.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::raw::poll (7 samples, 0.11%)</title><rect x="1188.7" y="197" width="1.3" height="15.0" fill="rgb(251,74,46)" rx="2" ry="2" />
+<text  x="1191.71" y="207.5" ></text>
+</g>
+<g >
+<title>futures_task::arc_wake::ArcWake::wake (39 samples, 0.61%)</title><rect x="915.6" y="133" width="7.2" height="15.0" fill="rgb(226,37,0)" rx="2" ry="2" />
+<text  x="918.59" y="143.5" ></text>
+</g>
+<g >
+<title>tokio::time::driver::wheel::level::Level::next_expiration (2 samples, 0.03%)</title><rect x="596.8" y="133" width="0.3" height="15.0" fill="rgb(243,103,26)" rx="2" ry="2" />
+<text  x="599.77" y="143.5" ></text>
+</g>
+<g >
+<title>alloc::sync::Arc&lt;T&gt;::drop_slow (33 samples, 0.52%)</title><rect x="377.7" y="293" width="6.0" height="15.0" fill="rgb(214,212,50)" rx="2" ry="2" />
+<text  x="380.66" y="303.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::time::inner::Instant::now (15 samples, 0.23%)</title><rect x="591.6" y="117" width="2.8" height="15.0" fill="rgb(253,22,22)" rx="2" ry="2" />
+<text  x="594.61" y="127.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::harness::Harness&lt;T,S&gt;::wake_by_val (345 samples, 5.39%)</title><rect x="238.1" y="261" width="63.6" height="15.0" fill="rgb(248,147,39)" rx="2" ry="2" />
+<text  x="241.15" y="271.5" >tokio:..</text>
+</g>
+<g >
+<title>tokio::io::driver::registration::Registration::poll_ready (1 samples, 0.02%)</title><rect x="406.8" y="309" width="0.2" height="15.0" fill="rgb(205,15,42)" rx="2" ry="2" />
+<text  x="409.77" y="319.5" ></text>
+</g>
+<g >
+<title>parking_lot::condvar::Condvar::wait_until_internal (236 samples, 3.69%)</title><rect x="598.1" y="197" width="43.5" height="15.0" fill="rgb(231,153,54)" rx="2" ry="2" />
+<text  x="601.06" y="207.5" >park..</text>
+</g>
+<g >
+<title>tokio::runtime::thread_pool::worker::Context::park_timeout (477 samples, 7.45%)</title><rect x="556.0" y="229" width="88.0" height="15.0" fill="rgb(250,155,9)" rx="2" ry="2" />
+<text  x="559.05" y="239.5" >tokio::run..</text>
+</g>
+<g >
+<title>tokio::sync::mpsc::block::is_ready (3 samples, 0.05%)</title><rect x="342.3" y="261" width="0.5" height="15.0" fill="rgb(242,228,45)" rx="2" ry="2" />
+<text  x="345.27" y="271.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::state::State::new (1 samples, 0.02%)</title><rect x="408.4" y="277" width="0.2" height="15.0" fill="rgb(239,183,36)" rx="2" ry="2" />
+<text  x="411.43" y="287.5" ></text>
+</g>
+<g >
+<title>tokio::time::driver::&lt;impl tokio::time::driver::handle::Handle&gt;::process_at_time (1 samples, 0.02%)</title><rect x="643.6" y="165" width="0.2" height="15.0" fill="rgb(235,206,5)" rx="2" ry="2" />
+<text  x="646.58" y="175.5" ></text>
+</g>
+<g >
+<title>futures_core::task::__internal::atomic_waker::AtomicWaker::wake (2 samples, 0.03%)</title><rect x="920.4" y="117" width="0.4" height="15.0" fill="rgb(242,123,27)" rx="2" ry="2" />
+<text  x="923.39" y="127.5" ></text>
+</g>
+<g >
+<title>std::net::tcp::TcpListener::take_error (1 samples, 0.02%)</title><rect x="406.4" y="309" width="0.2" height="15.0" fill="rgb(246,69,0)" rx="2" ry="2" />
+<text  x="409.40" y="319.5" ></text>
+</g>
+<g >
+<title>parking_lot_core::parking_lot::lock_bucket_pair (1 samples, 0.02%)</title><rect x="922.0" y="85" width="0.2" height="15.0" fill="rgb(245,107,17)" rx="2" ry="2" />
+<text  x="925.04" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;core::future::from_generator::GenFuture&lt;T&gt; as core::future::future::Future&gt;::poll (982 samples, 15.34%)</title><rect x="165.0" y="309" width="181.0" height="15.0" fill="rgb(221,181,54)" rx="2" ry="2" />
+<text  x="167.99" y="319.5" >&lt;core::future::from_gen..</text>
+</g>
+<g >
+<title>tokio::time::driver::&lt;impl tokio::time::driver::handle::Handle&gt;::process_at_time (17 samples, 0.27%)</title><rect x="594.4" y="165" width="3.1" height="15.0" fill="rgb(242,1,53)" rx="2" ry="2" />
+<text  x="597.38" y="175.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::harness::Harness&lt;T,S&gt;::complete (8 samples, 0.12%)</title><rect x="1166.0" y="181" width="1.5" height="15.0" fill="rgb(249,122,13)" rx="2" ry="2" />
+<text  x="1169.04" y="191.5" ></text>
+</g>
+<g >
+<title>__libc_recv (244 samples, 3.81%)</title><rect x="990.0" y="53" width="45.0" height="15.0" fill="rgb(211,44,39)" rx="2" ry="2" />
+<text  x="993.05" y="63.5" >__li..</text>
+</g>
+<g >
+<title>std::sys::unix::time::inner::Instant::now (1 samples, 0.02%)</title><rect x="643.4" y="117" width="0.2" height="15.0" fill="rgb(236,13,48)" rx="2" ry="2" />
+<text  x="646.40" y="127.5" ></text>
+</g>
+<g >
+<title>parking_lot::condvar::Condvar::notify_one_slow (3 samples, 0.05%)</title><rect x="409.2" y="277" width="0.5" height="15.0" fill="rgb(240,130,20)" rx="2" ry="2" />
+<text  x="412.17" y="287.5" ></text>
+</g>
+<g >
+<title>tokio::coop::Budget::decrement (4 samples, 0.06%)</title><rect x="175.7" y="277" width="0.7" height="15.0" fill="rgb(234,78,41)" rx="2" ry="2" />
+<text  x="178.68" y="287.5" ></text>
+</g>
+<g >
+<title>parking_lot::condvar::Condvar::notify_one_slow (10 samples, 0.16%)</title><rect x="254.4" y="229" width="1.8" height="15.0" fill="rgb(217,65,24)" rx="2" ry="2" />
+<text  x="257.37" y="239.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::alloc::&lt;impl core::alloc::global::GlobalAlloc for std::alloc::System&gt;::alloc (1 samples, 0.02%)</title><rect x="72.7" y="309" width="0.1" height="15.0" fill="rgb(211,148,6)" rx="2" ry="2" />
+<text  x="75.66" y="319.5" ></text>
+</g>
+<g >
+<title>__GI___clock_gettime (1 samples, 0.02%)</title><rect x="643.4" y="85" width="0.2" height="15.0" fill="rgb(219,28,29)" rx="2" ry="2" />
+<text  x="646.40" y="95.5" ></text>
+</g>
+<g >
+<title>tokio::coop::CURRENT::__getit (4 samples, 0.06%)</title><rect x="686.5" y="197" width="0.8" height="15.0" fill="rgb(213,185,12)" rx="2" ry="2" />
+<text  x="689.52" y="207.5" ></text>
+</g>
+<g >
+<title>tokio::sync::task::atomic_waker::AtomicWaker::wake (68 samples, 1.06%)</title><rect x="970.0" y="149" width="12.5" height="15.0" fill="rgb(235,157,25)" rx="2" ry="2" />
+<text  x="972.96" y="159.5" ></text>
+</g>
+<g >
+<title>std::rt::lang_start_internal::_$u7b$$u7b$closure$u7d$$u7d$::hd38309c108fe679d (51 samples, 0.80%)</title><rect x="10.0" y="341" width="9.4" height="15.0" fill="rgb(223,215,29)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" ></text>
+</g>
+<g >
+<title>__lll_unlock_wake_private (1 samples, 0.02%)</title><rect x="1166.8" y="149" width="0.2" height="15.0" fill="rgb(215,63,26)" rx="2" ry="2" />
+<text  x="1169.78" y="159.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::registration::Registration::new_with_interest_and_handle (1 samples, 0.02%)</title><rect x="407.0" y="293" width="0.1" height="15.0" fill="rgb(209,225,47)" rx="2" ry="2" />
+<text  x="409.96" y="303.5" ></text>
+</g>
+<g >
+<title>futures_task::waker_ref::WakerRef::new_unowned (1 samples, 0.02%)</title><rect x="405.7" y="309" width="0.2" height="15.0" fill="rgb(233,9,13)" rx="2" ry="2" />
+<text  x="408.67" y="319.5" ></text>
+</g>
+<g >
+<title>__vdso_clock_gettime (14 samples, 0.22%)</title><rect x="670.9" y="133" width="2.5" height="15.0" fill="rgb(239,101,12)" rx="2" ry="2" />
+<text  x="673.86" y="143.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::Driver::turn (2 samples, 0.03%)</title><rect x="642.7" y="165" width="0.3" height="15.0" fill="rgb(251,157,46)" rx="2" ry="2" />
+<text  x="645.66" y="175.5" ></text>
+</g>
+<g >
+<title>tcp_aggregation::main (2,126 samples, 33.20%)</title><rect x="19.4" y="453" width="391.8" height="15.0" fill="rgb(220,141,29)" rx="2" ry="2" />
+<text  x="22.40" y="463.5" >tcp_aggregation::main</text>
+</g>
+<g >
+<title>&lt;tokio::sync::batch_semaphore::Acquire as core::future::future::Future&gt;::poll (653 samples, 10.20%)</title><rect x="758.8" y="149" width="120.3" height="15.0" fill="rgb(232,228,41)" rx="2" ry="2" />
+<text  x="761.76" y="159.5" >&lt;tokio::sync::..</text>
+</g>
+<g >
+<title>_int_free (324 samples, 5.06%)</title><rect x="73.0" y="325" width="59.7" height="15.0" fill="rgb(222,227,52)" rx="2" ry="2" />
+<text  x="76.03" y="335.5" >_int_f..</text>
+</g>
+<g >
+<title>__lll_unlock_wake_private (8 samples, 0.12%)</title><rect x="131.3" y="309" width="1.4" height="15.0" fill="rgb(230,41,13)" rx="2" ry="2" />
+<text  x="134.26" y="319.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::time::inner::Instant::now (1 samples, 0.02%)</title><rect x="409.4" y="245" width="0.1" height="15.0" fill="rgb(239,114,52)" rx="2" ry="2" />
+<text  x="412.35" y="255.5" ></text>
+</g>
+<g >
+<title>mio::sys::unix::waker::eventfd::Waker::wake (1 samples, 0.02%)</title><rect x="408.6" y="261" width="0.2" height="15.0" fill="rgb(217,25,6)" rx="2" ry="2" />
+<text  x="411.62" y="271.5" ></text>
+</g>
+<g >
+<title>&lt;std::sys::unix::time::Timespec as core::cmp::Ord&gt;::cmp (1 samples, 0.02%)</title><rect x="666.1" y="181" width="0.2" height="15.0" fill="rgb(241,137,27)" rx="2" ry="2" />
+<text  x="669.07" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::loom::std::atomic_usize::AtomicUsize as core::ops::deref::Deref&gt;::deref (9 samples, 0.14%)</title><rect x="963.0" y="133" width="1.6" height="15.0" fill="rgb(247,170,34)" rx="2" ry="2" />
+<text  x="965.96" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::time::driver::TimerUnpark&lt;P&gt; as tokio::park::Unpark&gt;::unpark (2 samples, 0.03%)</title><rect x="408.8" y="277" width="0.4" height="15.0" fill="rgb(236,134,21)" rx="2" ry="2" />
+<text  x="411.80" y="287.5" ></text>
+</g>
+<g >
+<title>main (51 samples, 0.80%)</title><rect x="10.0" y="421" width="9.4" height="15.0" fill="rgb(223,140,35)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::time::inner::Instant::checked_sub_instant (1 samples, 0.02%)</title><rect x="643.2" y="101" width="0.2" height="15.0" fill="rgb(223,10,11)" rx="2" ry="2" />
+<text  x="646.22" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;futures_task::waker_ref::WakerRef as core::ops::deref::Deref&gt;::deref (1 samples, 0.02%)</title><rect x="346.0" y="309" width="0.1" height="15.0" fill="rgb(241,155,13)" rx="2" ry="2" />
+<text  x="348.96" y="319.5" ></text>
+</g>
+<g >
+<title>core::ptr::drop_in_place$LT$core..future..from_generator..GenFuture$LT$tokio..sync..mpsc..bounded..Sender$LT$core..option..Option$LT$bytes..bytes..Bytes$GT$$GT$..send..$u7b$$u7b$closure$u7d$$u7d$$GT$$GT$::he952984a43c093e8 (4 samples, 0.06%)</title><rect x="1149.8" y="165" width="0.8" height="15.0" fill="rgb(221,88,54)" rx="2" ry="2" />
+<text  x="1152.83" y="175.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::registration::Registration::poll_write_ready (2 samples, 0.03%)</title><rect x="406.6" y="325" width="0.4" height="15.0" fill="rgb(225,212,30)" rx="2" ry="2" />
+<text  x="409.59" y="335.5" ></text>
+</g>
+<g >
+<title>alloc::sync::Arc&lt;T&gt;::drop_slow (1 samples, 0.02%)</title><rect x="901.0" y="133" width="0.2" height="15.0" fill="rgb(250,147,18)" rx="2" ry="2" />
+<text  x="904.04" y="143.5" ></text>
+</g>
+<g >
+<title>tokio-runtime-w (4,226 samples, 66.00%)</title><rect x="411.2" y="469" width="778.8" height="15.0" fill="rgb(254,37,42)" rx="2" ry="2" />
+<text  x="414.20" y="479.5" >tokio-runtime-w</text>
+</g>
+<g >
+<title>tokio::runtime::Runtime::block_on (51 samples, 0.80%)</title><rect x="10.0" y="213" width="9.4" height="15.0" fill="rgb(213,72,5)" rx="2" ry="2" />
+<text  x="13.00" y="223.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait_private (1 samples, 0.02%)</title><rect x="969.8" y="101" width="0.2" height="15.0" fill="rgb(205,122,36)" rx="2" ry="2" />
+<text  x="972.78" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;core::future::from_generator::GenFuture&lt;T&gt; as core::future::future::Future&gt;::poll (25 samples, 0.39%)</title><rect x="10.2" y="165" width="4.6" height="15.0" fill="rgb(245,26,38)" rx="2" ry="2" />
+<text  x="13.18" y="175.5" ></text>
+</g>
+<g >
+<title>_int_free (1 samples, 0.02%)</title><rect x="143.2" y="309" width="0.2" height="15.0" fill="rgb(245,183,14)" rx="2" ry="2" />
+<text  x="146.24" y="319.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::time::Timespec::sub_timespec (1 samples, 0.02%)</title><rect x="578.2" y="133" width="0.1" height="15.0" fill="rgb(254,125,48)" rx="2" ry="2" />
+<text  x="581.16" y="143.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::registration::Registration::poll_ready (8 samples, 0.12%)</title><rect x="588.7" y="149" width="1.4" height="15.0" fill="rgb(251,53,10)" rx="2" ry="2" />
+<text  x="591.67" y="159.5" ></text>
+</g>
+<g >
+<title>futures_task::arc_wake::ArcWake::wake (5 samples, 0.08%)</title><rect x="404.2" y="309" width="0.9" height="15.0" fill="rgb(227,124,34)" rx="2" ry="2" />
+<text  x="407.19" y="319.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::thread_pool::ThreadPool::block_on (2,126 samples, 33.20%)</title><rect x="19.4" y="421" width="391.8" height="15.0" fill="rgb(242,196,7)" rx="2" ry="2" />
+<text  x="22.40" y="431.5" >tokio::runtime::thread_pool::ThreadPool::block_on</text>
+</g>
+<g >
+<title>&lt;tokio::park::thread::CachedParkThread as tokio::park::Park&gt;::park (24 samples, 0.37%)</title><rect x="15.0" y="165" width="4.4" height="15.0" fill="rgb(239,38,49)" rx="2" ry="2" />
+<text  x="17.98" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;&amp;std::fs::File as std::io::Write&gt;::write (3 samples, 0.05%)</title><rect x="656.9" y="181" width="0.5" height="15.0" fill="rgb(217,109,24)" rx="2" ry="2" />
+<text  x="659.85" y="191.5" ></text>
+</g>
+<g >
+<title>__GI___clone (4,226 samples, 66.00%)</title><rect x="411.2" y="453" width="778.8" height="15.0" fill="rgb(220,31,4)" rx="2" ry="2" />
+<text  x="414.20" y="463.5" >__GI___clone</text>
+</g>
+<g >
+<title>std::sys::unix::time::inner::now (1 samples, 0.02%)</title><rect x="409.4" y="229" width="0.1" height="15.0" fill="rgb(247,17,27)" rx="2" ry="2" />
+<text  x="412.35" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::io::driver::Handle as tokio::park::Unpark&gt;::unpark (1 samples, 0.02%)</title><rect x="408.6" y="277" width="0.2" height="15.0" fill="rgb(245,157,15)" rx="2" ry="2" />
+<text  x="411.62" y="287.5" ></text>
+</g>
+<g >
+<title>alloc::collections::btree::map::BTreeMap&lt;K,V&gt;::insert (50 samples, 0.78%)</title><rect x="132.7" y="325" width="9.3" height="15.0" fill="rgb(220,112,2)" rx="2" ry="2" />
+<text  x="135.74" y="335.5" ></text>
+</g>
+<g >
+<title>tokio::time::driver::wheel::Wheel::next_expiration (2 samples, 0.03%)</title><rect x="597.1" y="133" width="0.4" height="15.0" fill="rgb(224,67,46)" rx="2" ry="2" />
+<text  x="600.14" y="143.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::fd::FileDesc::write (1 samples, 0.02%)</title><rect x="408.6" y="213" width="0.2" height="15.0" fill="rgb(226,211,45)" rx="2" ry="2" />
+<text  x="411.62" y="223.5" ></text>
+</g>
+<g >
+<title>__rdl_alloc (2 samples, 0.03%)</title><rect x="72.5" y="325" width="0.3" height="15.0" fill="rgb(239,28,3)" rx="2" ry="2" />
+<text  x="75.47" y="335.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc (2 samples, 0.03%)</title><rect x="407.7" y="309" width="0.4" height="15.0" fill="rgb(236,176,27)" rx="2" ry="2" />
+<text  x="410.69" y="319.5" ></text>
+</g>
+<g >
+<title>tokio::time::driver::wheel::Wheel::next_expiration (4 samples, 0.06%)</title><rect x="596.4" y="149" width="0.7" height="15.0" fill="rgb(250,206,35)" rx="2" ry="2" />
+<text  x="599.41" y="159.5" ></text>
+</g>
+<g >
+<title>__vdso_clock_gettime (14 samples, 0.22%)</title><rect x="591.8" y="69" width="2.6" height="15.0" fill="rgb(214,39,32)" rx="2" ry="2" />
+<text  x="594.80" y="79.5" ></text>
+</g>
+<g >
+<title>tokio::io::driver::scheduled_io::ScheduledIo::wake0 (15 samples, 0.23%)</title><rect x="585.0" y="149" width="2.7" height="15.0" fill="rgb(226,134,29)" rx="2" ry="2" />
+<text  x="587.98" y="159.5" ></text>
+</g>
+<g >
+<title>__GI___libc_free (7 samples, 0.11%)</title><rect x="359.6" y="293" width="1.3" height="15.0" fill="rgb(242,87,6)" rx="2" ry="2" />
+<text  x="362.60" y="303.5" ></text>
+</g>
+<g >
+<title>std::sys::unix::fs::File::write (2 samples, 0.03%)</title><rect x="657.0" y="165" width="0.4" height="15.0" fill="rgb(248,11,19)" rx="2" ry="2" />
+<text  x="660.04" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::runtime::park::Unparker as tokio::park::Unpark&gt;::unpark (14 samples, 0.22%)</title><rect x="657.4" y="213" width="2.6" height="15.0" fill="rgb(212,143,8)" rx="2" ry="2" />
+<text  x="660.41" y="223.5" ></text>
+</g>
+<g >
+<title>tokio::sync::mpsc::chan::channel (2 samples, 0.03%)</title><rect x="407.7" y="325" width="0.4" height="15.0" fill="rgb(242,182,51)" rx="2" ry="2" />
+<text  x="410.69" y="335.5" ></text>
+</g>
+<g >
+<title>tokio::sync::task::atomic_waker::AtomicWaker::register_by_ref (16 samples, 0.25%)</title><rect x="343.0" y="277" width="3.0" height="15.0" fill="rgb(245,7,36)" rx="2" ry="2" />
+<text  x="346.01" y="287.5" ></text>
+</g>
+<g >
+<title>tokio::process::imp::orphan::OrphanQueueImpl&lt;T&gt;::reap_orphans (4 samples, 0.06%)</title><rect x="587.7" y="165" width="0.8" height="15.0" fill="rgb(219,149,21)" rx="2" ry="2" />
+<text  x="590.74" y="175.5" ></text>
+</g>
+<g >
+<title>tokio::time::driver::Driver&lt;P&gt;::park_internal (121 samples, 1.89%)</title><rect x="575.8" y="181" width="22.3" height="15.0" fill="rgb(221,126,25)" rx="2" ry="2" />
+<text  x="578.77" y="191.5" >t..</text>
+</g>
+<g >
+<title>&lt;tokio::coop::with_budget::ResetGuard as core::ops::drop::Drop&gt;::drop (1 samples, 0.02%)</title><rect x="14.8" y="165" width="0.2" height="15.0" fill="rgb(217,154,8)" rx="2" ry="2" />
+<text  x="17.79" y="175.5" ></text>
+</g>
+<g >
+<title>tcp-aggregation (2,177 samples, 34.00%)</title><rect x="10.0" y="469" width="401.2" height="15.0" fill="rgb(209,136,33)" rx="2" ry="2" />
+<text  x="13.00" y="479.5" >tcp-aggregation</text>
+</g>
+<g >
+<title>_int_free (1 samples, 0.02%)</title><rect x="900.9" y="133" width="0.1" height="15.0" fill="rgb(242,96,7)" rx="2" ry="2" />
+<text  x="903.85" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::park::either::Either&lt;A,B&gt; as tokio::park::Park&gt;::park_timeout (8 samples, 0.12%)</title><rect x="642.5" y="197" width="1.5" height="15.0" fill="rgb(238,162,7)" rx="2" ry="2" />
+<text  x="645.48" y="207.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::Runtime::block_on (2,126 samples, 33.20%)</title><rect x="19.4" y="437" width="391.8" height="15.0" fill="rgb(226,125,14)" rx="2" ry="2" />
+<text  x="22.40" y="447.5" >tokio::runtime::Runtime::block_on</text>
+</g>
+<g >
+<title>tokio::runtime::task::harness::Harness&lt;T,S&gt;::poll (2,721 samples, 42.50%)</title><rect x="687.3" y="197" width="501.4" height="15.0" fill="rgb(245,53,27)" rx="2" ry="2" />
+<text  x="690.26" y="207.5" >tokio::runtime::task::harness::Harness&lt;T,S&gt;::poll</text>
+</g>
+<g >
+<title>std::time::Instant::now (1 samples, 0.02%)</title><rect x="409.4" y="261" width="0.1" height="15.0" fill="rgb(238,4,33)" rx="2" ry="2" />
+<text  x="412.35" y="271.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::future::poll_fn::PollFn&lt;F&gt; as core::future::future::Future&gt;::poll (23 samples, 0.36%)</title><rect x="10.6" y="149" width="4.2" height="15.0" fill="rgb(222,145,15)" rx="2" ry="2" />
+<text  x="13.55" y="159.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::task::state::State::ref_dec (17 samples, 0.27%)</title><rect x="239.1" y="245" width="3.1" height="15.0" fill="rgb(221,22,25)" rx="2" ry="2" />
+<text  x="242.07" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;bytes::bytes::Bytes as core::convert::From&lt;alloc::vec::Vec&lt;u8&gt;&gt;&gt;::from (6 samples, 0.09%)</title><rect x="729.6" y="165" width="1.2" height="15.0" fill="rgb(222,205,45)" rx="2" ry="2" />
+<text  x="732.65" y="175.5" ></text>
+</g>
+<g >
+<title>futures_task::waker::clone_arc_raw (10 samples, 0.16%)</title><rect x="400.0" y="293" width="1.8" height="15.0" fill="rgb(217,207,35)" rx="2" ry="2" />
+<text  x="402.95" y="303.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (1 samples, 0.02%)</title><rect x="411.0" y="357" width="0.2" height="15.0" fill="rgb(241,152,22)" rx="2" ry="2" />
+<text  x="414.01" y="367.5" ></text>
+</g>
+<g >
+<title>__rdl_dealloc (2 samples, 0.03%)</title><rect x="360.9" y="293" width="0.4" height="15.0" fill="rgb(218,161,33)" rx="2" ry="2" />
+<text  x="363.89" y="303.5" ></text>
+</g>
+<g >
+<title>std::thread::local::LocalKey&lt;T&gt;::with (14 samples, 0.22%)</title><rect x="174.0" y="293" width="2.6" height="15.0" fill="rgb(225,89,40)" rx="2" ry="2" />
+<text  x="177.02" y="303.5" ></text>
+</g>
+<g >
+<title>__GI___clock_gettime (16 samples, 0.25%)</title><rect x="670.5" y="149" width="2.9" height="15.0" fill="rgb(213,228,21)" rx="2" ry="2" />
+<text  x="673.49" y="159.5" ></text>
+</g>
+<g >
+<title>futures_task::arc_wake::ArcWake::wake (227 samples, 3.55%)</title><rect x="880.9" y="149" width="41.9" height="15.0" fill="rgb(247,4,34)" rx="2" ry="2" />
+<text  x="883.95" y="159.5" >fut..</text>
+</g>
+<g >
+<title>futures_util::stream::stream::StreamExt::poll_next_unpin (2,125 samples, 33.19%)</title><rect x="19.4" y="357" width="391.6" height="15.0" fill="rgb(229,96,39)" rx="2" ry="2" />
+<text  x="22.40" y="367.5" >futures_util::stream::stream::StreamExt::poll_next_un..</text>
+</g>
+<g >
+<title>tokio::park::thread::wake (11 samples, 0.17%)</title><rect x="920.8" y="117" width="2.0" height="15.0" fill="rgb(251,132,5)" rx="2" ry="2" />
+<text  x="923.75" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;tokio::time::driver::TimerUnpark&lt;P&gt; as tokio::park::Unpark&gt;::unpark (2 samples, 0.03%)</title><rect x="660.0" y="213" width="0.4" height="15.0" fill="rgb(248,75,35)" rx="2" ry="2" />
+<text  x="662.99" y="223.5" ></text>
+</g>
+<g >
+<title>tokio::runtime::thread_pool::worker::Shared::schedule (7 samples, 0.11%)</title><rect x="408.6" y="293" width="1.3" height="15.0" fill="rgb(218,201,44)" rx="2" ry="2" />
+<text  x="411.62" y="303.5" ></text>
+</g>
+<g >
+<title>std::rt::lang_start_internal (51 samples, 0.80%)</title><rect x="10.0" y="405" width="9.4" height="15.0" fill="rgb(207,206,17)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" ></text>
+</g>
+<g >
+<title>bytes::bytes::promotable_even_drop (5 samples, 0.08%)</title><rect x="142.0" y="325" width="0.9" height="15.0" fill="rgb(252,178,47)" rx="2" ry="2" />
+<text  x="144.95" y="335.5" ></text>
+</g>
+</g>
+</svg>
