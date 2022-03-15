@@ -219,35 +219,39 @@ async fn do_one_request(id: usize) -> (usize, usize) {
 
 #[tokio::main]
 async fn main() {
-    let start = Instant::now();
-    let n_concurrent_requests = 1;
+    tokio::spawn(async move {
+        let start = Instant::now();
+        let n_concurrent_requests = 1;
 
-    let mut total_bytes_read = 0;
-    let mut futures = FuturesUnordered::new();
-    for i in 0..n_concurrent_requests {
-        futures.push(do_one_request(i))
-    }
-    let duration_future = tokio::time::sleep(tokio::time::Duration::from_secs(60)).fuse();
-    tokio::pin!(duration_future);
-
-    let mut request_counter = 0;
-    loop {
-        select! {
-            Some((id, bytes_read)) = futures.next() => {
-                request_counter += 1;
-                total_bytes_read += bytes_read;
-                futures.push(do_one_request(id));
-            }
-            _ = &mut duration_future => break,
+        let mut total_bytes_read = 0;
+        let mut futures = FuturesUnordered::new();
+        for i in 0..n_concurrent_requests {
+            futures.push(do_one_request(i))
         }
-    }
+        let duration_future = tokio::time::sleep(tokio::time::Duration::from_secs(60)).fuse();
+        tokio::pin!(duration_future);
 
-    let elapsed = start.elapsed();
+        let mut request_counter = 0;
+        loop {
+            select! {
+                Some((id, bytes_read)) = futures.next() => {
+                    request_counter += 1;
+                    total_bytes_read += bytes_read;
+                    futures.push(do_one_request(id));
+                }
+                _ = &mut duration_future => break,
+            }
+        }
 
-    println!(
-        "Done!\n\trequests: {}\n\telapsed: {:?}\n\tThroughput: {} Mb/s",
-        request_counter,
-        elapsed,
-        total_bytes_read / elapsed.as_secs() as usize / 1024 / 1024
-    );
+        let elapsed = start.elapsed();
+
+        println!(
+            "Done!\n\trequests: {}\n\telapsed: {:?}\n\tThroughput: {} Mb/s",
+            request_counter,
+            elapsed,
+            total_bytes_read / elapsed.as_secs() as usize / 1024 / 1024
+        );
+    })
+    .await
+    .unwrap();
 }
